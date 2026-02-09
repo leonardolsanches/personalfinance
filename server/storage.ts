@@ -33,9 +33,129 @@ import {
 const dbPath = process.env.SQLITE_DB_PATH || "data/finance.db";
 const dir = dirname(dbPath);
 if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+console.log(`[SQLite] Database path: ${require("path").resolve(dbPath)}`);
 const sqlite = new Database(dbPath);
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
+
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    color TEXT DEFAULT '#3B82F6',
+    icon TEXT,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS subcategories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    category_id INTEGER NOT NULL REFERENCES categories(id),
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS bank_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    bank_name TEXT,
+    account_type TEXT,
+    balance TEXT DEFAULT '0',
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS beneficiaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    active INTEGER DEFAULT 1,
+    is_default INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    original_description TEXT,
+    short_title TEXT,
+    amount TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'prevista',
+    date TEXT NOT NULL,
+    transaction_date TEXT,
+    payment_date TEXT,
+    category_id INTEGER REFERENCES categories(id),
+    subcategory_id INTEGER REFERENCES subcategories(id),
+    bank_account_id INTEGER REFERENCES bank_accounts(id),
+    beneficiary_id INTEGER REFERENCES beneficiaries(id),
+    notes TEXT,
+    imported_from TEXT,
+    imported_from_row INTEGER,
+    source TEXT DEFAULT 'manual',
+    needs_categorization INTEGER DEFAULT 0,
+    is_recurring INTEGER DEFAULT 0,
+    recurring_months INTEGER,
+    recurring_group_id TEXT,
+    is_refund INTEGER DEFAULT 0,
+    is_fraud_suspect INTEGER DEFAULT 0,
+    is_card_bill_payment INTEGER DEFAULT 0,
+    installment_current INTEGER,
+    installment_total INTEGER,
+    installment_group_id TEXT,
+    card_bill_month TEXT,
+    card_type TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS payables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pendente',
+    category_id INTEGER REFERENCES categories(id),
+    subcategory_id INTEGER REFERENCES subcategories(id),
+    is_installment INTEGER DEFAULT 0,
+    installment_number INTEGER,
+    total_installments INTEGER,
+    parent_payable_id INTEGER,
+    notes TEXT,
+    paid_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS categorization_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern TEXT NOT NULL,
+    category_id INTEGER NOT NULL REFERENCES categories(id),
+    subcategory_id INTEGER REFERENCES subcategories(id),
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS budget_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    short_title TEXT,
+    type TEXT NOT NULL,
+    category_id INTEGER REFERENCES categories(id),
+    subcategory_id INTEGER REFERENCES subcategories(id),
+    beneficiary_id INTEGER REFERENCES beneficiaries(id),
+    year_month TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    transaction_date TEXT,
+    bill_due_date TEXT,
+    is_recurring INTEGER DEFAULT 0,
+    is_from_installment INTEGER DEFAULT 0,
+    installment_group_id TEXT,
+    installment_current INTEGER,
+    installment_total INTEGER,
+    source TEXT DEFAULT 'manual',
+    notes TEXT,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+console.log("[SQLite] All tables created/verified successfully");
+
 export const db = drizzle(sqlite);
 export { sqlite };
 
