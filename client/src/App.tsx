@@ -23,9 +23,10 @@ import ManutencaoDados from "@/pages/manutencao-dados";
 import Extrato from "@/pages/extrato";
 import PendenciasImportacao from "@/pages/pendencias-importacao";
 import Admin from "@/pages/admin";
+import MediaCategorias from "@/pages/media-categorias";
 
 function BeneficiarPage() {
-  return <Beneficiarios defaultTab="atribuir" />;
+  return <Beneficiarios defaultTab="visao-geral" />;
 }
 
 function Router() {
@@ -48,6 +49,7 @@ function Router() {
       <Route path="/regras" component={Regras} />
       <Route path="/manutencao" component={ManutencaoDados} />
       <Route path="/pendencias-importacao" component={PendenciasImportacao} />
+      <Route path="/media-categorias" component={MediaCategorias} />
       <Route path="/admin" component={Admin} />
       <Route component={NotFound} />
     </Switch>

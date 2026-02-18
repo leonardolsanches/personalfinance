@@ -20,7 +20,7 @@ export function PageHeader({ title, subtitle, children, selectedMonth, onMonthCh
           <span className="text-xs text-muted-foreground whitespace-nowrap hidden md:inline">{subtitle}</span>
         )}
       </div>
-      <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+      <div className="flex items-end gap-2 ml-auto flex-shrink-0">
         {children}
         {onMonthChange !== undefined && (
           <MonthNavigator selectedMonth={selectedMonth ?? null} onMonthChange={onMonthChange} />

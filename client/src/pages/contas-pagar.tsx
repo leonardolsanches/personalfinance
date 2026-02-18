@@ -38,6 +38,8 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { PageHeader } from "@/components/page-header";
+import { useColumnWidths } from "@/hooks/use-column-widths";
+import { ResizeHandle } from "@/components/resize-handle";
 
 const payableFormSchema = z.object({
   description: z.string().min(1, "Descricao e obrigatoria"),
@@ -61,7 +63,11 @@ function formatCurrency(value: number | string) {
 }
 
 function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('pt-BR');
+  const d = new Date(date);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(2);
+  return `${dd}/${mm}/${yy}`;
 }
 
 function getStatusVariant(status: string, dueDate: string) {
@@ -89,6 +95,9 @@ export default function ContasPagar() {
   const [editingPayable, setEditingPayable] = useState<Payable | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterStatus, setFilterStatus] = useState<"all" | "pendente" | "pago" | "vencido">("all");
+
+  const defaultColWidths = { vencimento: 80, descricao: 0, categoria: 100, parcela: 60, status: 80, valor: 90, acoes: 80 };
+  const { colWidths, handleResizeStart } = useColumnWidths("contas-pagar", defaultColWidths);
 
   const { data: payables = [], isLoading } = useQuery<Payable[]>({
     queryKey: ["/api/payables"],
@@ -119,7 +128,7 @@ export default function ContasPagar() {
   const selectedCategoryId = form.watch("categoryId");
   const isInstallment = form.watch("isInstallment");
 
-  const expenseCategories = categories.filter((c) => c.type === "despesa" && c.active);
+  const expenseCategories = categories.filter((c) => c.active);
   const filteredSubcategories = subcategories.filter(
     (s) => s.categoryId === Number(selectedCategoryId) && s.active
   );
@@ -515,23 +524,23 @@ export default function ContasPagar() {
             <div className="overflow-hidden">
               <Table className="text-sm table-fixed w-full">
                 <colgroup>
-                  <col style={{ width: "80px" }} />
-                  <col />
-                  <col style={{ width: "100px" }} />
-                  <col style={{ width: "60px" }} />
-                  <col style={{ width: "80px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "80px" }} />
+                  <col style={colWidths.vencimento ? { width: `${colWidths.vencimento}px` } : undefined} />
+                  <col style={colWidths.descricao ? { width: `${colWidths.descricao}px` } : undefined} />
+                  <col style={colWidths.categoria ? { width: `${colWidths.categoria}px` } : undefined} />
+                  <col style={colWidths.parcela ? { width: `${colWidths.parcela}px` } : undefined} />
+                  <col style={colWidths.status ? { width: `${colWidths.status}px` } : undefined} />
+                  <col style={colWidths.valor ? { width: `${colWidths.valor}px` } : undefined} />
+                  <col style={colWidths.acoes ? { width: `${colWidths.acoes}px` } : undefined} />
                 </colgroup>
                 <TableHeader>
                   <TableRow className="h-9">
-                    <TableHead className="py-1.5">Vencimento</TableHead>
-                    <TableHead className="py-1.5">Descricao</TableHead>
-                    <TableHead className="py-1.5">Categoria</TableHead>
-                    <TableHead className="py-1.5">Parcela</TableHead>
-                    <TableHead className="py-1.5">Status</TableHead>
-                    <TableHead className="py-1.5 text-right">Valor</TableHead>
-                    <TableHead className="py-1.5">Acoes</TableHead>
+                    <TableHead className="py-1.5 relative">Vencimento<ResizeHandle col="vencimento" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="py-1.5 relative">Descricao<ResizeHandle col="descricao" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="py-1.5 relative">Categoria<ResizeHandle col="categoria" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="py-1.5 relative">Parcela<ResizeHandle col="parcela" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="py-1.5 relative">Status<ResizeHandle col="status" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="py-1.5 text-right relative">Valor<ResizeHandle col="valor" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="py-1.5 relative">Acoes<ResizeHandle col="acoes" onResizeStart={handleResizeStart} /></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>

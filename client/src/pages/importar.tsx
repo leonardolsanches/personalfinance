@@ -240,7 +240,10 @@ export default function Importar() {
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr + "T00:00:00");
-    return date.toLocaleDateString("pt-BR");
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yy = String(date.getFullYear()).slice(2);
+    return `${dd}/${mm}/${yy}`;
   };
 
   if (previewData) {

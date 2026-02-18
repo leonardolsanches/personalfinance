@@ -49,6 +49,17 @@ export async function registerRoutes(
 ): Promise<Server> {
   await storage.seedData();
 
+  app.get("/api/download/sqlite-version", (req, res) => {
+    const zipPath = path.join(process.env.HOME || "/home/runner", "personal-finance-sqlite.zip");
+    if (!fs.existsSync(zipPath)) {
+      return res.status(404).json({ message: "Arquivo ZIP nao encontrado. Gere o pacote primeiro." });
+    }
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", "attachment; filename=personal-finance-sqlite.zip");
+    const stream = fs.createReadStream(zipPath);
+    stream.pipe(res);
+  });
+
   app.get("/api/dashboard/stats", async (req, res) => {
     try {
       const refMonth = req.query.refMonth as string | undefined;
@@ -522,6 +533,20 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/transactions/delete-batch", async (req, res) => {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "ids array is required" });
+      }
+      await storage.deleteTransactionsByIds(ids);
+      res.json({ success: true, deleted: ids.length });
+    } catch (error) {
+      console.error("Error batch deleting transactions:", error);
+      res.status(500).json({ error: "Failed to batch delete transactions" });
+    }
+  });
+
   app.delete("/api/transactions/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -704,14 +729,34 @@ export async function registerRoutes(
   app.patch("/api/budget-items/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      const syncFutureMonths = req.body.syncFutureMonths === true;
+      const { syncFutureMonths: _, ...bodyData } = req.body;
       const data = {
-        ...req.body,
-        categoryId: parseOptionalInt(req.body.categoryId),
-        subcategoryId: parseOptionalInt(req.body.subcategoryId),
-        beneficiaryId: parseOptionalInt(req.body.beneficiaryId),
+        ...bodyData,
+        categoryId: parseOptionalInt(bodyData.categoryId),
+        subcategoryId: parseOptionalInt(bodyData.subcategoryId),
+        beneficiaryId: parseOptionalInt(bodyData.beneficiaryId),
       };
       const item = await storage.updateBudgetItem(id, data);
-      res.json(item);
+      
+      let syncedCount = 0;
+      if (syncFutureMonths && item && item.recurringGroupId) {
+        const syncFields: any = {};
+        if (data.description !== undefined) syncFields.description = data.description;
+        if (data.shortTitle !== undefined) syncFields.shortTitle = data.shortTitle;
+        if (data.type !== undefined) syncFields.type = data.type;
+        if (data.categoryId !== undefined) syncFields.categoryId = data.categoryId;
+        if (data.subcategoryId !== undefined) syncFields.subcategoryId = data.subcategoryId;
+        if (data.beneficiaryId !== undefined) syncFields.beneficiaryId = data.beneficiaryId;
+        if (data.amount !== undefined) syncFields.amount = data.amount;
+        if (data.notes !== undefined) syncFields.notes = data.notes;
+        
+        if (Object.keys(syncFields).length > 0) {
+          syncedCount = await storage.syncRecurringBudgetItems(item, syncFields);
+        }
+      }
+      
+      res.json({ ...item, syncedCount });
     } catch (error) {
       console.error("Error updating budget item:", error);
       res.status(500).json({ error: "Failed to update budget item" });
@@ -726,6 +771,78 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting budget item:", error);
       res.status(500).json({ error: "Failed to delete budget item" });
+    }
+  });
+
+  app.post("/api/budget-items/categorize-batch", async (req, res) => {
+    try {
+      const { items } = req.body;
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "items array is required" });
+      }
+      for (const item of items) {
+        await storage.updateBudgetItem(item.id, {
+          categoryId: item.categoryId || null,
+          subcategoryId: item.subcategoryId || null,
+        });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error categorizing budget items batch:", error);
+      res.status(500).json({ error: "Failed to categorize budget items batch" });
+    }
+  });
+
+  app.post("/api/budget-items/update-short-title-batch", async (req, res) => {
+    try {
+      const schema = z.object({
+        ids: z.array(z.number()).min(1),
+        shortTitle: z.string(),
+      });
+      const parsed = schema.parse(req.body);
+      for (const id of parsed.ids) {
+        await storage.updateBudgetItem(id, { shortTitle: parsed.shortTitle || null });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("Error updating budget item short title batch:", error);
+      res.status(500).json({ error: "Failed to update short title batch" });
+    }
+  });
+
+  app.post("/api/budget-items/delete-batch", async (req, res) => {
+    try {
+      const schema = z.object({
+        ids: z.array(z.number()).min(1),
+      });
+      const parsed = schema.parse(req.body);
+      await storage.deleteBudgetItemsByIds(parsed.ids);
+      res.json({ success: true, deleted: parsed.ids.length });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      console.error("Error batch deleting budget items:", error);
+      res.status(500).json({ error: "Failed to batch delete budget items" });
+    }
+  });
+
+  app.post("/api/budget-items/update-beneficiary-batch", async (req, res) => {
+    try {
+      const { ids, beneficiaryId } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "ids array is required" });
+      }
+      for (const id of ids) {
+        await storage.updateBudgetItem(id, { beneficiaryId: beneficiaryId || null });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error updating budget item beneficiary batch:", error);
+      res.status(500).json({ error: "Failed to update budget item beneficiary batch" });
     }
   });
 
@@ -2172,10 +2289,77 @@ export async function registerRoutes(
       await db.delete(beneficiaries);
       await db.delete(bankAccounts);
 
+      await db.execute(sql`ALTER SEQUENCE categories_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE subcategories_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE bank_accounts_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE beneficiaries_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE transactions_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE payables_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE categorization_rules_id_seq RESTART WITH 1`);
+      await db.execute(sql`ALTER SEQUENCE budget_items_id_seq RESTART WITH 1`);
+
       res.json({ success: true, message: "Database reset successfully" });
     } catch (error) {
       console.error("Error resetting database:", error);
       res.status(500).json({ error: "Failed to reset database" });
+    }
+  });
+
+  app.post("/api/admin/delete-table", async (req, res) => {
+    try {
+      const { table } = req.body;
+      if (!table) {
+        return res.status(400).json({ error: "Table name is required" });
+      }
+
+      const tableMap: Record<string, any> = {
+        budgetItems,
+        payables,
+        transactions,
+        categorizationRules,
+        subcategories,
+        categories,
+        beneficiaries,
+        bankAccounts,
+      };
+
+      const dependencyOrder: Record<string, string[]> = {
+        categories: ["budgetItems", "payables", "transactions", "subcategories"],
+        subcategories: ["budgetItems", "payables", "transactions"],
+        bankAccounts: ["transactions"],
+        beneficiaries: ["budgetItems", "payables", "transactions"],
+      };
+
+      const tableObj = tableMap[table];
+      if (!tableObj) {
+        return res.status(400).json({ error: `Invalid table: ${table}` });
+      }
+
+      const deps = dependencyOrder[table] || [];
+      const deletedTables: string[] = [];
+
+      for (const dep of deps) {
+        if (tableMap[dep]) {
+          await db.delete(tableMap[dep]);
+          const seqName = dep.replace(/([A-Z])/g, "_$1").toLowerCase().replace(/^_/, "");
+          try {
+            await db.execute(sql.raw(`ALTER SEQUENCE ${seqName}_id_seq RESTART WITH 1`));
+          } catch {}
+          deletedTables.push(dep);
+        }
+      }
+
+      await db.delete(tableObj);
+      const seqName = table.replace(/([A-Z])/g, "_$1").toLowerCase().replace(/^_/, "");
+      try {
+        await db.execute(sql.raw(`ALTER SEQUENCE ${seqName}_id_seq RESTART WITH 1`));
+      } catch {}
+      deletedTables.push(table);
+
+      res.json({ success: true, deletedTables });
+    } catch (error) {
+      console.error("Error deleting table:", error);
+      res.status(500).json({ error: "Failed to delete table" });
     }
   });
 
@@ -2205,58 +2389,82 @@ export async function registerRoutes(
       await db.delete(bankAccounts);
 
       if (t.categories?.length) {
+        await db.execute(sql`ALTER SEQUENCE categories_id_seq RESTART WITH 1`);
         for (const row of t.categories) {
-          await db.execute(sql`INSERT INTO categories (id, name, type, color, icon, active, created_at) VALUES (${row.id}, ${row.name}, ${row.type}, ${row.color}, ${row.icon}, ${row.active}, ${row.createdAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO categories (id, name, type, color, icon, active, created_at) VALUES (${row.id}, ${row.name}, ${row.type}, ${row.color}, ${row.icon}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.categories.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE categories_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.categories = t.categories.length;
       }
 
       if (t.subcategories?.length) {
+        await db.execute(sql`ALTER SEQUENCE subcategories_id_seq RESTART WITH 1`);
         for (const row of t.subcategories) {
-          await db.execute(sql`INSERT INTO subcategories (id, name, category_id, active, created_at) VALUES (${row.id}, ${row.name}, ${row.categoryId}, ${row.active}, ${row.createdAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO subcategories (id, name, category_id, active, created_at) VALUES (${row.id}, ${row.name}, ${row.categoryId}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.subcategories.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE subcategories_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.subcategories = t.subcategories.length;
       }
 
       if (t.bankAccounts?.length) {
+        await db.execute(sql`ALTER SEQUENCE bank_accounts_id_seq RESTART WITH 1`);
         for (const row of t.bankAccounts) {
-          await db.execute(sql`INSERT INTO bank_accounts (id, name, bank_name, account_type, balance, active, created_at) VALUES (${row.id}, ${row.name}, ${row.bankName}, ${row.accountType}, ${row.balance}, ${row.active}, ${row.createdAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO bank_accounts (id, name, bank_name, account_type, balance, active, created_at) VALUES (${row.id}, ${row.name}, ${row.bankName}, ${row.accountType}, ${row.balance}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.bankAccounts.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE bank_accounts_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.bankAccounts = t.bankAccounts.length;
       }
 
       if (t.beneficiaries?.length) {
+        await db.execute(sql`ALTER SEQUENCE beneficiaries_id_seq RESTART WITH 1`);
         for (const row of t.beneficiaries) {
-          await db.execute(sql`INSERT INTO beneficiaries (id, name, active, is_default, created_at) VALUES (${row.id}, ${row.name}, ${row.active}, ${row.isDefault}, ${row.createdAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO beneficiaries (id, name, active, is_default, created_at) VALUES (${row.id}, ${row.name}, ${row.active}, ${row.isDefault}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.beneficiaries.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE beneficiaries_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.beneficiaries = t.beneficiaries.length;
       }
 
       if (t.categorizationRules?.length) {
+        await db.execute(sql`ALTER SEQUENCE categorization_rules_id_seq RESTART WITH 1`);
         for (const row of t.categorizationRules) {
-          await db.execute(sql`INSERT INTO categorization_rules (id, pattern, category_id, subcategory_id, active, created_at) VALUES (${row.id}, ${row.pattern}, ${row.categoryId}, ${row.subcategoryId}, ${row.active}, ${row.createdAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO categorization_rules (id, pattern, category_id, subcategory_id, active, created_at) VALUES (${row.id}, ${row.pattern}, ${row.categoryId}, ${row.subcategoryId}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.categorizationRules.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE categorization_rules_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.categorizationRules = t.categorizationRules.length;
       }
 
       if (t.transactions?.length) {
+        await db.execute(sql`ALTER SEQUENCE transactions_id_seq RESTART WITH 1`);
         for (const row of t.transactions) {
-          await db.execute(sql`INSERT INTO transactions (id, description, original_description, short_title, amount, type, status, date, transaction_date, payment_date, category_id, subcategory_id, bank_account_id, beneficiary_id, notes, imported_from, imported_from_row, source, needs_categorization, is_recurring, recurring_months, recurring_group_id, is_refund, is_fraud_suspect, is_card_bill_payment, installment_current, installment_total, installment_group_id, card_bill_month, card_type, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.originalDescription}, ${row.shortTitle}, ${row.amount}, ${row.type}, ${row.status}, ${row.date}, ${row.transactionDate}, ${row.paymentDate}, ${row.categoryId}, ${row.subcategoryId}, ${row.bankAccountId}, ${row.beneficiaryId}, ${row.notes || null}, ${row.importedFrom}, ${row.importedFromRow}, ${row.source}, ${row.needsCategorization}, ${row.isRecurring}, ${row.recurringMonths || null}, ${row.recurringGroupId || null}, ${row.isRefund}, ${row.isFraudSuspect || false}, ${row.isCardBillPayment}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.installmentGroupId}, ${row.cardBillMonth}, ${row.cardType || null}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO transactions (id, description, original_description, short_title, amount, type, status, date, transaction_date, payment_date, category_id, subcategory_id, bank_account_id, beneficiary_id, notes, imported_from, imported_from_row, source, needs_categorization, is_recurring, recurring_months, recurring_group_id, is_refund, is_fraud_suspect, is_card_bill_payment, installment_current, installment_total, installment_group_id, card_bill_month, card_type, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.originalDescription}, ${row.shortTitle}, ${row.amount}, ${row.type}, ${row.status}, ${row.date}, ${row.transactionDate}, ${row.paymentDate}, ${row.categoryId}, ${row.subcategoryId}, ${row.bankAccountId}, ${row.beneficiaryId}, ${row.notes || null}, ${row.importedFrom}, ${row.importedFromRow}, ${row.source}, ${row.needsCategorization}, ${row.isRecurring}, ${row.recurringMonths || null}, ${row.recurringGroupId || null}, ${row.isRefund}, ${row.isFraudSuspect || false}, ${row.isCardBillPayment}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.installmentGroupId}, ${row.cardBillMonth}, ${row.cardType || null}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.transactions.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE transactions_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.transactions = t.transactions.length;
       }
 
       if (t.payables?.length) {
+        await db.execute(sql`ALTER SEQUENCE payables_id_seq RESTART WITH 1`);
         for (const row of t.payables) {
-          await db.execute(sql`INSERT INTO payables (id, description, amount, due_date, status, category_id, subcategory_id, is_installment, installment_number, total_installments, parent_payable_id, notes, paid_at, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.amount}, ${row.dueDate}, ${row.status}, ${row.categoryId}, ${row.subcategoryId}, ${row.isInstallment}, ${row.installmentNumber}, ${row.totalInstallments}, ${row.parentPayableId}, ${row.notes}, ${row.paidAt}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO payables (id, description, amount, due_date, status, category_id, subcategory_id, is_installment, installment_number, total_installments, parent_payable_id, notes, paid_at, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.amount}, ${row.dueDate}, ${row.status}, ${row.categoryId}, ${row.subcategoryId}, ${row.isInstallment}, ${row.installmentNumber}, ${row.totalInstallments}, ${row.parentPayableId}, ${row.notes}, ${row.paidAt}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.payables.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE payables_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.payables = t.payables.length;
       }
 
       if (t.budgetItems?.length) {
+        await db.execute(sql`ALTER SEQUENCE budget_items_id_seq RESTART WITH 1`);
         for (const row of t.budgetItems) {
-          await db.execute(sql`INSERT INTO budget_items (id, description, short_title, type, category_id, subcategory_id, beneficiary_id, year_month, amount, transaction_date, bill_due_date, is_recurring, is_from_installment, installment_group_id, installment_current, installment_total, source, notes, active, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.shortTitle}, ${row.type}, ${row.categoryId}, ${row.subcategoryId}, ${row.beneficiaryId}, ${row.yearMonth}, ${row.amount}, ${row.transactionDate}, ${row.billDueDate}, ${row.isRecurring}, ${row.isFromInstallment}, ${row.installmentGroupId}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.source || 'manual'}, ${row.notes || null}, ${row.active !== undefined ? row.active : true}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()})`);
+          await db.execute(sql`INSERT INTO budget_items (id, description, short_title, type, category_id, subcategory_id, beneficiary_id, year_month, amount, transaction_date, bill_due_date, is_recurring, recurring_group_id, is_from_installment, installment_group_id, installment_current, installment_total, source, notes, active, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.shortTitle}, ${row.type}, ${row.categoryId}, ${row.subcategoryId}, ${row.beneficiaryId}, ${row.yearMonth}, ${row.amount}, ${row.transactionDate}, ${row.billDueDate}, ${row.isRecurring}, ${row.recurringGroupId || null}, ${row.isFromInstallment}, ${row.installmentGroupId}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.source || 'manual'}, ${row.notes || null}, ${row.active !== undefined ? row.active : true}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
         }
+        const maxId = Math.max(...t.budgetItems.map((r: any) => r.id));
+        await db.execute(sql`ALTER SEQUENCE budget_items_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
         imported.budgetItems = t.budgetItems.length;
       }
 

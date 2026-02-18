@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { filterCardBillPayments } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +25,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Tags, Check, ChevronRight, ChevronLeft, AlertCircle, Search, CheckSquare, ChevronUp, ChevronDown, CreditCard, Building2, PenLine, Plus, TrendingUp, TrendingDown, ArrowUpDown, Pencil, Trash2, X } from "lucide-react";
+import { Tags, Check, ChevronRight, ChevronLeft, AlertCircle, Search, CheckSquare, ChevronUp, ChevronDown, CreditCard, Building2, PenLine, Plus, TrendingUp, TrendingDown, ArrowUpDown, Pencil, Trash2, X, LineChart as LineChartIcon } from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts";
 import {
   Dialog,
   DialogContent,
@@ -33,8 +35,10 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { Transaction, Category, Subcategory, BankAccount, Beneficiary } from "@shared/schema";
+import type { Transaction, Category, Subcategory, BankAccount, Beneficiary, BudgetItem } from "@shared/schema";
 import { PageHeader } from "@/components/page-header";
+import { useColumnWidths } from "@/hooks/use-column-widths";
+import { ResizeHandle } from "@/components/resize-handle";
 
 function formatCurrency(value: number | string) {
   const numValue = typeof value === 'string' ? parseFloat(value) : value;
@@ -45,7 +49,28 @@ function formatCurrency(value: number | string) {
 }
 
 function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('pt-BR');
+  const d = new Date(date);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(2);
+  return `${dd}/${mm}/${yy}`;
+}
+
+function getCompetenciaMonth(t: { paymentDate?: string | null; source?: string | null; cardBillMonth?: string | null; date: string }): string {
+  if (t.paymentDate) {
+    const d = new Date(t.paymentDate);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+  if (t.source === "cartao" && t.cardBillMonth) return t.cardBillMonth;
+  const d = new Date(t.date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+const MONTH_NAMES_SHORT = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+
+function ymToLabel(ym: string): string {
+  const [y, mo] = ym.split("-");
+  return `${MONTH_NAMES_SHORT[parseInt(mo) - 1]}/${y.slice(2)}`;
 }
 
 export default function Categorizacao() {
@@ -56,11 +81,14 @@ export default function Categorizacao() {
   const [bulkCategoryId, setBulkCategoryId] = useState("");
   const [bulkSubcategoryId, setBulkSubcategoryId] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
-  const [sortColumn, setSortColumn] = useState<"date" | "description" | "amount" | "type" | "status" | "source">("date");
+  const [sortColumn, setSortColumn] = useState<"date" | "description" | "amount" | "type" | "status" | "source" | "subcategory">("date");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [showAll, setShowAll] = useState(false);
+  const [dataSource, setDataSource] = useState<"transacoes" | "planejamento">("transacoes");
+  const [chartMode, setChartMode] = useState<"receita_despesa" | "planejado_realizado">("receita_despesa");
   const [filterType, setFilterType] = useState<"all" | "receita" | "despesa">("all");
   const [filterStatus, setFilterStatus] = useState<"all" | "prevista" | "realizada">("all");
+  const [filterSource, setFilterSource] = useState<"all" | "manual" | "cartao" | "conta_corrente">("all");
   const [filterCategoryId, setFilterCategoryId] = useState<string>("all");
   const [filterSubcategoryId, setFilterSubcategoryId] = useState<string>("all");
   const [filterBeneficiaryId, setFilterBeneficiaryId] = useState<string>("all");
@@ -72,6 +100,9 @@ export default function Categorizacao() {
     setCurrentPage(1);
   };
   const itemsPerPage = 10;
+
+  const defaultColWidths = { checkbox: 32, data: 65, dtPgto: 65, descricao: 0, orig: 44, tipo: 44, status: 50, valor: 85, categoria: 120, subcategoria: 120, pgto: 70, acao: 80 };
+  const { colWidths, handleResizeStart } = useColumnWidths("categorizacao", defaultColWidths);
 
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [subcategoryModalOpen, setSubcategoryModalOpen] = useState(false);
@@ -87,11 +118,15 @@ export default function Categorizacao() {
 
   const { data: allTransactions = [], isLoading: allLoading } = useQuery<Transaction[]>({
     queryKey: ["/api/transactions"],
-    enabled: showAll,
   });
 
-  const transactions = showAll ? allTransactions : uncategorizedTransactions;
-  const transactionsLoading = showAll ? allLoading : uncategorizedLoading;
+  const { data: allBudgetItems = [], isLoading: budgetItemsLoading } = useQuery<BudgetItem[]>({
+    queryKey: ["/api/budget-items"],
+  });
+
+  const rawTransactions = showAll ? allTransactions : uncategorizedTransactions;
+  const transactions = filterCardBillPayments(rawTransactions, allTransactions);
+  const transactionsLoading = dataSource === "transacoes" ? (showAll ? allLoading : uncategorizedLoading) : false;
 
   const { data: categories = [] } = useQuery<Category[]>({
     queryKey: ["/api/categories"],
@@ -203,6 +238,20 @@ export default function Categorizacao() {
     },
   });
 
+  const categorizeBudgetBatchMutation = useMutation({
+    mutationFn: async (items: { id: number; categoryId: number; subcategoryId?: number }[]) => {
+      return apiRequest("POST", "/api/budget-items/categorize-batch", { items });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/budget-items"] });
+      toast({ title: "Itens de planejamento categorizados com sucesso!" });
+      setSelectedCategories({});
+    },
+    onError: () => {
+      toast({ title: "Erro ao categorizar itens de planejamento", variant: "destructive" });
+    },
+  });
+
   const createCategoryMutation = useMutation({
     mutationFn: async (data: { name: string; type: string; color: string }) => {
       return apiRequest("POST", "/api/categories", data);
@@ -280,17 +329,25 @@ export default function Categorizacao() {
     }));
   };
 
-  const handleCategorize = (transactionId: number) => {
-    const selection = selectedCategories[transactionId];
+  const handleCategorize = (itemId: number) => {
+    const selection = selectedCategories[itemId];
     if (!selection?.categoryId) {
       toast({ title: "Selecione uma categoria", variant: "destructive" });
       return;
     }
-    categorizeMutation.mutate({
-      id: transactionId,
-      categoryId: Number(selection.categoryId),
-      subcategoryId: selection.subcategoryId ? Number(selection.subcategoryId) : undefined,
-    });
+    if (dataSource === "planejamento") {
+      categorizeBudgetBatchMutation.mutate([{
+        id: itemId,
+        categoryId: Number(selection.categoryId),
+        subcategoryId: selection.subcategoryId ? Number(selection.subcategoryId) : undefined,
+      }]);
+    } else {
+      categorizeMutation.mutate({
+        id: itemId,
+        categoryId: Number(selection.categoryId),
+        subcategoryId: selection.subcategoryId ? Number(selection.subcategoryId) : undefined,
+      });
+    }
   };
 
   const handleCategorizeAll = () => {
@@ -303,15 +360,16 @@ export default function Categorizacao() {
       }));
 
     if (items.length === 0) {
-      toast({ title: "Selecione categorias para as transacoes", variant: "destructive" });
+      toast({ title: "Selecione categorias para os itens", variant: "destructive" });
       return;
     }
 
-    categorizeAllMutation.mutate(items);
+    const mutation = dataSource === "planejamento" ? categorizeBudgetBatchMutation : categorizeAllMutation;
+    mutation.mutate(items);
   };
 
   const getFilteredCategories = (type: string) => {
-    return categories.filter((c) => c.type === type && c.active);
+    return categories.filter((c) => c.active);
   };
 
   const getFilteredSubcategories = (categoryId: string) => {
@@ -329,9 +387,9 @@ export default function Categorizacao() {
     setCurrentPage(1);
   };
 
-  const SortableHeader = ({ column, children }: { column: typeof sortColumn; children: React.ReactNode }) => (
+  const SortableHeader = ({ column, children, resizeCol }: { column: typeof sortColumn; children: React.ReactNode; resizeCol?: string }) => (
     <TableHead 
-      className="cursor-pointer select-none py-1"
+      className="relative cursor-pointer select-none py-1"
       onClick={() => handleSort(column)}
       data-testid={`header-sort-${column}`}
     >
@@ -341,11 +399,71 @@ export default function Categorizacao() {
           sortDirection === "asc" ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
         ) : null}
       </div>
+      {resizeCol && <ResizeHandle col={resizeCol} onResizeStart={handleResizeStart} />}
     </TableHead>
   );
 
-  const filteredTransactions = transactions
-    .filter((t) => !t.isCardBillPayment)
+  type UnifiedItem = {
+    id: number;
+    date: string;
+    paymentDate: string | null;
+    description: string;
+    shortTitle: string | null;
+    originalDescription: string | null;
+    type: string;
+    status: string;
+    source: string | null;
+    amount: string | number;
+    categoryId: number | null;
+    subcategoryId: number | null;
+    beneficiaryId: number | null;
+    bankAccountId: number | null;
+    itemSource: "transaction" | "budget";
+  };
+
+  const budgetItemsForView: BudgetItem[] = (() => {
+    if (dataSource !== "planejamento") return [];
+    if (showAll) return allBudgetItems;
+    return allBudgetItems.filter(b => !b.categoryId);
+  })();
+
+  const unifiedItems: UnifiedItem[] = dataSource === "transacoes"
+    ? transactions.map(t => ({
+        id: t.id,
+        date: t.date,
+        paymentDate: t.paymentDate,
+        description: t.description,
+        shortTitle: t.shortTitle,
+        originalDescription: t.originalDescription,
+        type: t.type,
+        status: t.status,
+        source: t.source,
+        amount: t.amount,
+        categoryId: t.categoryId,
+        subcategoryId: t.subcategoryId,
+        beneficiaryId: t.beneficiaryId,
+        bankAccountId: t.bankAccountId,
+        itemSource: "transaction" as const,
+      }))
+    : budgetItemsForView.map(b => ({
+        id: b.id,
+        date: b.transactionDate || `${b.yearMonth}-01`,
+        paymentDate: b.billDueDate,
+        description: b.description,
+        shortTitle: b.shortTitle,
+        originalDescription: null,
+        type: b.type,
+        status: "prevista",
+        source: b.source,
+        amount: b.amount,
+        categoryId: b.categoryId,
+        subcategoryId: b.subcategoryId,
+        beneficiaryId: b.beneficiaryId,
+        bankAccountId: null,
+        itemSource: "budget" as const,
+      }));
+
+  const filteredTransactions = unifiedItems
     .filter((t) => {
       if (selectedMonth) {
         const txDate = t.date.substring(0, 7);
@@ -353,6 +471,7 @@ export default function Categorizacao() {
       }
       if (filterType !== "all" && t.type !== filterType) return false;
       if (filterStatus !== "all" && t.status !== filterStatus) return false;
+      if (filterSource !== "all" && t.source !== filterSource) return false;
       if (filterCategoryId !== "all") {
         if (filterCategoryId === "empty" ? t.categoryId : t.categoryId !== Number(filterCategoryId)) return false;
       }
@@ -399,6 +518,10 @@ export default function Categorizacao() {
         case "source":
           aVal = a.source || "";
           bVal = b.source || "";
+          break;
+        case "subcategory":
+          aVal = (subcategories.find(s => s.id === a.subcategoryId)?.name || "").toLowerCase();
+          bVal = (subcategories.find(s => s.id === b.subcategoryId)?.name || "").toLowerCase();
           break;
         default:
           return 0;
@@ -456,7 +579,120 @@ export default function Categorizacao() {
   );
   const filteredSaldo = filteredTotals.receitas - filteredTotals.despesas;
 
-  const pendingCount = transactions.filter(t => !t.isCardBillPayment).length;
+  const chartWindowMonths = useMemo(() => {
+    if (!selectedMonth) return [];
+    const [refY, refM] = selectedMonth.split("-").map(Number);
+    const months: string[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(refY, refM - 1 - i, 1);
+      months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    }
+    return months;
+  }, [selectedMonth]);
+
+  const allTxFiltered = useMemo(() => filterCardBillPayments(allTransactions, allTransactions), [allTransactions]);
+
+  const globalChartData = useMemo(() => {
+    if (chartWindowMonths.length === 0) return [];
+    const monthSet = new Set(chartWindowMonths);
+    const monthly = new Map<string, { receitas: number; despesas: number; recPlan: number; despPlan: number }>();
+    for (const ym of chartWindowMonths) {
+      monthly.set(ym, { receitas: 0, despesas: 0, recPlan: 0, despPlan: 0 });
+    }
+
+    for (const t of allTxFiltered) {
+      const ym = getCompetenciaMonth(t);
+      if (!monthSet.has(ym)) continue;
+      const amount = Math.abs(typeof t.amount === "string" ? parseFloat(t.amount) : t.amount);
+      const entry = monthly.get(ym)!;
+      if (t.type === "receita") entry.receitas += amount;
+      else entry.despesas += amount;
+    }
+
+    for (const b of allBudgetItems) {
+      if (!b.active) continue;
+      const ym = b.yearMonth;
+      if (!monthSet.has(ym)) continue;
+      const amount = Math.abs(typeof b.amount === "string" ? parseFloat(b.amount) : Number(b.amount));
+      const entry = monthly.get(ym)!;
+      if (b.type === "receita") entry.recPlan += amount;
+      else entry.despPlan += amount;
+    }
+
+    return chartWindowMonths.map(ym => {
+      const d = monthly.get(ym)!;
+      return {
+        month: ymToLabel(ym),
+        receitas: Math.round(d.receitas * 100) / 100,
+        despesas: Math.round(d.despesas * 100) / 100,
+        saldo: Math.round((d.receitas - d.despesas) * 100) / 100,
+        receitaPlan: Math.round(d.recPlan * 100) / 100,
+        despesaPlan: Math.round(d.despPlan * 100) / 100,
+        saldoPlan: Math.round((d.recPlan - d.despPlan) * 100) / 100,
+      };
+    });
+  }, [allTxFiltered, allBudgetItems, chartWindowMonths]);
+
+  const perCategoryCharts = useMemo(() => {
+    if (chartWindowMonths.length === 0) return [];
+    const monthSet = new Set(chartWindowMonths);
+    const catMonthly = new Map<number, Map<string, { receitas: number; despesas: number; recPlan: number; despPlan: number }>>();
+
+    for (const t of allTxFiltered) {
+      if (!t.categoryId) continue;
+      const ym = getCompetenciaMonth(t);
+      if (!monthSet.has(ym)) continue;
+      if (!catMonthly.has(t.categoryId)) {
+        const m = new Map<string, { receitas: number; despesas: number; recPlan: number; despPlan: number }>();
+        for (const ym2 of chartWindowMonths) m.set(ym2, { receitas: 0, despesas: 0, recPlan: 0, despPlan: 0 });
+        catMonthly.set(t.categoryId, m);
+      }
+      const amount = Math.abs(typeof t.amount === "string" ? parseFloat(t.amount) : t.amount);
+      const entry = catMonthly.get(t.categoryId)!.get(ym)!;
+      if (t.type === "receita") entry.receitas += amount;
+      else entry.despesas += amount;
+    }
+
+    for (const b of allBudgetItems) {
+      if (!b.active || !b.categoryId) continue;
+      const ym = b.yearMonth;
+      if (!monthSet.has(ym)) continue;
+      if (!catMonthly.has(b.categoryId)) {
+        const m = new Map<string, { receitas: number; despesas: number; recPlan: number; despPlan: number }>();
+        for (const ym2 of chartWindowMonths) m.set(ym2, { receitas: 0, despesas: 0, recPlan: 0, despPlan: 0 });
+        catMonthly.set(b.categoryId, m);
+      }
+      const amount = Math.abs(typeof b.amount === "string" ? parseFloat(b.amount) : Number(b.amount));
+      const entry = catMonthly.get(b.categoryId)!.get(ym)!;
+      if (b.type === "receita") entry.recPlan += amount;
+      else entry.despPlan += amount;
+    }
+
+    return Array.from(catMonthly.entries())
+      .map(([catId, monthMap]) => {
+        const cat = categories.find(c => c.id === catId);
+        if (!cat) return null;
+        const data = chartWindowMonths.map(ym => {
+          const d = monthMap.get(ym)!;
+          return {
+            month: ymToLabel(ym),
+            receitas: Math.round(d.receitas * 100) / 100,
+            despesas: Math.round(d.despesas * 100) / 100,
+            receitaPlan: Math.round(d.recPlan * 100) / 100,
+            despesaPlan: Math.round(d.despPlan * 100) / 100,
+          };
+        });
+        const hasData = data.some(d => d.receitas > 0 || d.despesas > 0 || d.receitaPlan > 0 || d.despesaPlan > 0);
+        if (!hasData) return null;
+        return { catId, catName: cat.name, catColor: cat.color || "#3B82F6", data };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a!.catName.localeCompare(b!.catName)) as { catId: number; catName: string; catColor: string; data: any[] }[];
+  }, [allTxFiltered, allBudgetItems, categories, chartWindowMonths]);
+
+  const formatK = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0);
+
+  const pendingCount = unifiedItems.length;
   const filteredCount = filteredTransactions.length;
   const selectedCount = Object.values(selectedCategories).filter((s) => s.categoryId).length;
   
@@ -491,14 +727,13 @@ export default function Categorizacao() {
     setSelectedIds(newSelected);
   };
 
-  // Aplicar categoria em massa aos itens selecionados (apenas os filtrados)
   const handleBulkCategorize = () => {
     if (!bulkCategoryId) {
       toast({ title: "Selecione uma categoria", variant: "destructive" });
       return;
     }
     if (filteredSelectedIds.size === 0) {
-      toast({ title: "Selecione transacoes para categorizar", variant: "destructive" });
+      toast({ title: "Selecione itens para categorizar", variant: "destructive" });
       return;
     }
 
@@ -508,9 +743,9 @@ export default function Categorizacao() {
       subcategoryId: bulkSubcategoryId ? Number(bulkSubcategoryId) : undefined,
     }));
 
-    categorizeAllMutation.mutate(items, {
+    const mutation = dataSource === "planejamento" ? categorizeBudgetBatchMutation : categorizeAllMutation;
+    mutation.mutate(items, {
       onSuccess: () => {
-        // Remover apenas os itens categorizados da seleção
         const newSelected = new Set(selectedIds);
         items.forEach((item) => newSelected.delete(item.id));
         setSelectedIds(newSelected);
@@ -520,17 +755,18 @@ export default function Categorizacao() {
     });
   };
 
-  // Categorias para bulk (usar tipo da primeira transação selecionada ou despesa como padrão)
   const bulkTransactionType = selectedIds.size > 0
-    ? transactions.find((t) => selectedIds.has(t.id))?.type || "despesa"
+    ? unifiedItems.find((t) => selectedIds.has(t.id))?.type || "despesa"
     : "despesa";
   const bulkCategories = getFilteredCategories(bulkTransactionType);
   const bulkSubcategories = getFilteredSubcategories(bulkCategoryId);
 
-  if (transactionsLoading) {
+  const isLoading = dataSource === "transacoes" ? transactionsLoading : budgetItemsLoading;
+
+  if (isLoading) {
     return (
       <div>
-        <PageHeader title="Categorizar" subtitle="Classifique transacoes importadas" selectedMonth={selectedMonth} onMonthChange={handleMonthChange} />
+        <PageHeader title="Categorizar" selectedMonth={selectedMonth} onMonthChange={handleMonthChange} />
         <div className="px-4 py-3 space-y-3">
           <Skeleton className="h-20 w-full" />
           <Skeleton className="h-96 w-full" />
@@ -541,7 +777,77 @@ export default function Categorizacao() {
 
   return (
     <div>
-      <PageHeader title="Categorizar" subtitle="Classifique transacoes importadas" selectedMonth={selectedMonth} onMonthChange={handleMonthChange}>
+      <PageHeader title="Categorizar" selectedMonth={selectedMonth} onMonthChange={handleMonthChange}>
+        <div className="flex flex-col gap-0.5">
+          <label className="text-[9px] text-muted-foreground leading-none">Visao</label>
+          <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v as any); setCurrentPage(1); }}>
+            <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-status">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Ambos</SelectItem>
+              <SelectItem value="realizada">Realizado</SelectItem>
+              <SelectItem value="prevista">Planejado</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <label className="text-[9px] text-muted-foreground leading-none">Tipo</label>
+          <Select value={filterType} onValueChange={(v) => { setFilterType(v as any); setCurrentPage(1); }}>
+            <SelectTrigger className="w-[80px] h-8 text-xs" data-testid="filter-type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todos</SelectItem>
+              <SelectItem value="receita">Receitas</SelectItem>
+              <SelectItem value="despesa">Despesas</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <label className="text-[9px] text-muted-foreground leading-none">Origem</label>
+          <Select value={filterSource} onValueChange={(v) => { setFilterSource(v as any); setCurrentPage(1); }}>
+            <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-source">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todas</SelectItem>
+              <SelectItem value="manual">Manual</SelectItem>
+              <SelectItem value="cartao">Cartao</SelectItem>
+              <SelectItem value="conta_corrente">Cta Corrente</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <label className="text-[9px] text-muted-foreground leading-none">Categoria</label>
+          <Select value={filterCategoryId} onValueChange={(v) => { setFilterCategoryId(v); setFilterSubcategoryId("all"); setCurrentPage(1); }}>
+            <SelectTrigger className="w-[120px] h-8 text-xs" data-testid="filter-category">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todas</SelectItem>
+              <SelectItem value="empty">Vazio</SelectItem>
+              {categories.filter(c => c.active).sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
+                <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <label className="text-[9px] text-muted-foreground leading-none">Subcategoria</label>
+          <Select value={filterSubcategoryId} onValueChange={(v) => { setFilterSubcategoryId(v); setCurrentPage(1); }}>
+            <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-subcategory">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todas</SelectItem>
+              <SelectItem value="empty">Vazio</SelectItem>
+              {subcategories.filter(s => s.active && (filterCategoryId === "all" || filterCategoryId === "empty" || s.categoryId === Number(filterCategoryId))).map((s) => (
+                <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <Button
           variant={showAll ? "default" : "outline"}
           size="sm"
@@ -596,6 +902,111 @@ export default function Categorizacao() {
       </div>
 
       <Card>
+        <CardContent className="p-3">
+          <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <LineChartIcon className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="text-xs font-medium">Evolucao Mensal (12 meses)</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Button
+                variant={chartMode === "receita_despesa" ? "default" : "outline"}
+                size="sm"
+                className="text-[10px]"
+                onClick={() => setChartMode("receita_despesa")}
+                data-testid="button-chart-receita-despesa"
+              >
+                Receita vs Despesa
+              </Button>
+              <Button
+                variant={chartMode === "planejado_realizado" ? "default" : "outline"}
+                size="sm"
+                className="text-[10px]"
+                onClick={() => setChartMode("planejado_realizado")}
+                data-testid="button-chart-planejado-realizado"
+              >
+                Planejado vs Realizado
+              </Button>
+            </div>
+          </div>
+          {globalChartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart data={globalChartData} margin={{ top: 10, right: 10, bottom: 0, left: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+                <XAxis dataKey="month" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={formatK} stroke="hsl(var(--muted-foreground))" width={45} />
+                <RechartsTooltip
+                  formatter={(value: number, name: string) => [formatCurrency(value), name]}
+                  contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px', fontSize: '11px' }}
+                />
+                {chartMode === "receita_despesa" ? (
+                  <>
+                    <Line type="monotone" dataKey="receitas" name="Receitas" stroke="#10B981" strokeWidth={2} dot={{ r: 3 }} />
+                    <Line type="monotone" dataKey="despesas" name="Despesas" stroke="#EF4444" strokeWidth={2} dot={{ r: 3 }} />
+                    <Line type="monotone" dataKey="saldo" name="Saldo" stroke="#3B82F6" strokeWidth={1.5} strokeDasharray="5 5" dot={{ r: 2 }} />
+                  </>
+                ) : (
+                  <>
+                    <Line type="monotone" dataKey="receitas" name="Receita Real." stroke="#10B981" strokeWidth={2} dot={{ r: 3 }} />
+                    <Line type="monotone" dataKey="despesas" name="Despesa Real." stroke="#EF4444" strokeWidth={2} dot={{ r: 3 }} />
+                    <Line type="monotone" dataKey="receitaPlan" name="Receita Plan." stroke="#10B981" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 2 }} />
+                    <Line type="monotone" dataKey="despesaPlan" name="Despesa Plan." stroke="#EF4444" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 2 }} />
+                  </>
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[260px] flex items-center justify-center text-muted-foreground text-xs">Sem dados</div>
+          )}
+        </CardContent>
+      </Card>
+
+      {perCategoryCharts.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5 px-1">
+            <LineChartIcon className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-xs font-medium">Graficos por Categoria (12 meses)</span>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+            {perCategoryCharts.map(chart => (
+              <Card key={chart.catId}>
+                <CardContent className="p-3">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: chart.catColor }} />
+                    <span className="text-xs font-medium truncate" data-testid={`text-cat-chart-title-${chart.catId}`}>{chart.catName}</span>
+                  </div>
+                  <ResponsiveContainer width="100%" height={180}>
+                    <LineChart data={chart.data} margin={{ top: 5, right: 5, bottom: 0, left: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                      <XAxis dataKey="month" tick={{ fontSize: 8 }} stroke="hsl(var(--muted-foreground))" />
+                      <YAxis tick={{ fontSize: 8 }} tickFormatter={formatK} stroke="hsl(var(--muted-foreground))" width={35} />
+                      <RechartsTooltip
+                        formatter={(value: number, name: string) => [formatCurrency(value), name]}
+                        contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px', fontSize: '10px' }}
+                      />
+                      {chartMode === "receita_despesa" ? (
+                        <>
+                          <Line type="monotone" dataKey="receitas" name="Receitas" stroke="#10B981" strokeWidth={1.5} dot={{ r: 2 }} />
+                          <Line type="monotone" dataKey="despesas" name="Despesas" stroke="#EF4444" strokeWidth={1.5} dot={{ r: 2 }} />
+                        </>
+                      ) : (
+                        <>
+                          <Line type="monotone" dataKey="receitas" name="Receita Real." stroke="#10B981" strokeWidth={1.5} dot={{ r: 2 }} />
+                          <Line type="monotone" dataKey="despesas" name="Despesa Real." stroke="#EF4444" strokeWidth={1.5} dot={{ r: 2 }} />
+                          <Line type="monotone" dataKey="receitaPlan" name="Receita Plan." stroke="#10B981" strokeWidth={1.5} strokeDasharray="4 4" dot={{ r: 1.5 }} />
+                          <Line type="monotone" dataKey="despesaPlan" name="Despesa Plan." stroke="#EF4444" strokeWidth={1.5} strokeDasharray="4 4" dot={{ r: 1.5 }} />
+                        </>
+                      )}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <Card>
         <CardHeader className="pb-2 pt-3">
           <div className="flex items-end gap-2 flex-wrap">
             <div className="flex flex-col gap-1">
@@ -610,64 +1021,6 @@ export default function Categorizacao() {
                   data-testid="input-search-categorization"
                 />
               </div>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Tipo</Label>
-              <Select value={filterType} onValueChange={(v) => { setFilterType(v as any); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[80px] h-8 text-xs" data-testid="filter-type">
-                  <SelectValue placeholder="Tipo" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="receita">Receitas</SelectItem>
-                  <SelectItem value="despesa">Despesas</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Status</Label>
-              <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v as any); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[90px] h-8 text-xs" data-testid="filter-status">
-                  <SelectValue placeholder="Status" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="prevista">Previstas</SelectItem>
-                  <SelectItem value="realizada">Realizadas</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Categoria</Label>
-              <Select value={filterCategoryId} onValueChange={(v) => { setFilterCategoryId(v); setFilterSubcategoryId("all"); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[120px] h-8 text-xs" data-testid="filter-category">
-                  <SelectValue placeholder="Todas" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas</SelectItem>
-                  <SelectItem value="empty">Vazio</SelectItem>
-                  {categories.filter(c => c.active).map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.name} ({c.type === "receita" ? "rec." : "desp."})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Subcategoria</Label>
-              <Select value={filterSubcategoryId} onValueChange={(v) => { setFilterSubcategoryId(v); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-subcategory">
-                  <SelectValue placeholder="Todas" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas</SelectItem>
-                  <SelectItem value="empty">Vazio</SelectItem>
-                  {subcategories.filter(s => s.active && (filterCategoryId === "all" || filterCategoryId === "empty" || s.categoryId === Number(filterCategoryId))).map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
             </div>
             <div className="flex flex-col gap-1">
               <Label className="text-xs text-muted-foreground">Beneficiario</Label>
@@ -698,8 +1051,8 @@ export default function Categorizacao() {
                 </SelectContent>
               </Select>
             </div>
-            {(filterCategoryId !== "all" || filterSubcategoryId !== "all" || filterBeneficiaryId !== "all" || filterBankAccountId !== "all") && (
-              <Button variant="ghost" size="sm" className="text-xs" onClick={() => { setFilterCategoryId("all"); setFilterSubcategoryId("all"); setFilterBeneficiaryId("all"); setFilterBankAccountId("all"); setCurrentPage(1); }} data-testid="button-clear-filters">
+            {(filterBeneficiaryId !== "all" || filterBankAccountId !== "all") && (
+              <Button variant="ghost" size="sm" className="text-xs" onClick={() => { setFilterBeneficiaryId("all"); setFilterBankAccountId("all"); setCurrentPage(1); }} data-testid="button-clear-filters">
                 <X className="w-3 h-3 mr-0.5" />
                 Limpar
               </Button>
@@ -761,7 +1114,7 @@ export default function Categorizacao() {
                 <Button
                   size="sm"
                   onClick={handleBulkCategorize}
-                  disabled={categorizeAllMutation.isPending || checkedCount === 0 || !bulkCategoryId}
+                  disabled={categorizeAllMutation.isPending || categorizeBudgetBatchMutation.isPending || checkedCount === 0 || !bulkCategoryId}
                   data-testid="button-bulk-categorize"
                 >
                   <Check className="w-4 h-4 mr-1" />
@@ -775,25 +1128,26 @@ export default function Categorizacao() {
           {filteredTransactions.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <Tags className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>{searchTerm ? "Nenhuma transacao encontrada" : "Nenhuma transacao pendente de categorizacao"}</p>
-              <p className="text-sm">{searchTerm ? "Tente outro termo de busca" : "Importe um extrato bancario para comecar"}</p>
+              <p>{searchTerm ? "Nenhum item encontrado" : (showAll ? "Nenhum item encontrado para este periodo" : (dataSource === "planejamento" ? "Nenhum item de planejamento pendente de categorizacao" : "Nenhuma transacao pendente de categorizacao"))}</p>
+              <p className="text-sm">{searchTerm ? "Tente outro termo de busca" : (showAll ? "Altere os filtros ou o mes de referencia" : "Clique em 'Todas' para ver itens ja categorizados")}</p>
             </div>
           ) : (
             <>
             <div className="overflow-hidden">
               <Table className="text-sm table-fixed w-full">
                 <colgroup>
-                  <col style={{ width: "32px" }} />
-                  <col style={{ width: "72px" }} />
-                  <col />
-                  <col style={{ width: "44px" }} />
-                  <col style={{ width: "44px" }} />
-                  <col style={{ width: "50px" }} />
-                  <col style={{ width: "70px" }} />
-                  <col style={{ width: "85px" }} />
-                  <col style={{ width: "120px" }} />
-                  <col style={{ width: "120px" }} />
-                  <col style={{ width: "80px" }} />
+                  <col style={{ width: colWidths.checkbox + "px" }} />
+                  <col style={{ width: colWidths.data + "px" }} />
+                  <col style={{ width: colWidths.dtPgto + "px" }} />
+                  <col style={colWidths.descricao ? { width: colWidths.descricao + "px" } : undefined} />
+                  <col style={{ width: colWidths.orig + "px" }} />
+                  <col style={{ width: colWidths.tipo + "px" }} />
+                  <col style={{ width: colWidths.status + "px" }} />
+                  <col style={{ width: colWidths.valor + "px" }} />
+                  <col style={{ width: colWidths.categoria + "px" }} />
+                  <col style={{ width: colWidths.subcategoria + "px" }} />
+                  <col style={{ width: colWidths.pgto + "px" }} />
+                  <col style={{ width: colWidths.acao + "px" }} />
                 </colgroup>
                 <TableHeader>
                   <TableRow className="h-7">
@@ -804,14 +1158,14 @@ export default function Categorizacao() {
                         data-testid="checkbox-select-all"
                       />
                     </TableHead>
-                    <SortableHeader column="date">Data</SortableHeader>
-                    <SortableHeader column="description">Descricao</SortableHeader>
-                    <SortableHeader column="source">Orig.</SortableHeader>
-                    <SortableHeader column="type">Tipo</SortableHeader>
-                    <SortableHeader column="status">Status</SortableHeader>
-                    <TableHead className="py-1">Pgto</TableHead>
+                    <SortableHeader column="date" resizeCol="data">Data</SortableHeader>
+                    <TableHead className="relative py-1">Dt.Pgto<ResizeHandle col="dtPgto" onResizeStart={handleResizeStart} /></TableHead>
+                    <SortableHeader column="description" resizeCol="descricao">Descricao</SortableHeader>
+                    <SortableHeader column="source" resizeCol="orig">Orig.</SortableHeader>
+                    <SortableHeader column="type" resizeCol="tipo">Tipo</SortableHeader>
+                    <SortableHeader column="status" resizeCol="status">Visao</SortableHeader>
                     <TableHead 
-                      className="text-right cursor-pointer select-none py-1"
+                      className="relative text-right cursor-pointer select-none py-1"
                       onClick={() => handleSort("amount")}
                       data-testid="header-sort-amount"
                     >
@@ -821,10 +1175,12 @@ export default function Categorizacao() {
                           sortDirection === "asc" ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
                         ) : null}
                       </div>
+                      <ResizeHandle col="valor" onResizeStart={handleResizeStart} />
                     </TableHead>
-                    <TableHead className="py-1">Categoria</TableHead>
-                    <TableHead className="py-1">Subcateg.</TableHead>
-                    <TableHead className="py-1">Acao</TableHead>
+                    <TableHead className="relative py-1">Categoria<ResizeHandle col="categoria" onResizeStart={handleResizeStart} /></TableHead>
+                    <SortableHeader column="subcategory" resizeCol="subcategoria">Subcateg.</SortableHeader>
+                    <TableHead className="relative py-1">Pgto<ResizeHandle col="pgto" onResizeStart={handleResizeStart} /></TableHead>
+                    <TableHead className="relative py-1">Acao<ResizeHandle col="acao" onResizeStart={handleResizeStart} /></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -847,6 +1203,7 @@ export default function Categorizacao() {
                           />
                         </TableCell>
                         <TableCell className="py-0.5 whitespace-nowrap">{formatDate(transaction.date)}</TableCell>
+                        <TableCell className="py-0.5 whitespace-nowrap text-xs">{transaction.paymentDate ? formatDate(transaction.paymentDate) : "-"}</TableCell>
                         <TableCell className="py-0.5 font-medium overflow-hidden truncate">
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -874,11 +1231,8 @@ export default function Categorizacao() {
                         </TableCell>
                         <TableCell className="py-0.5">
                           <Badge variant={transaction.status === "realizada" ? "default" : "outline"}>
-                            {transaction.status === "realizada" ? "Real" : "Prev"}
+                            {transaction.status === "realizada" ? "Real" : "Plan"}
                           </Badge>
-                        </TableCell>
-                        <TableCell className="py-0.5 whitespace-nowrap text-xs truncate overflow-hidden">
-                          {getBankAccountName(transaction.bankAccountId)}
                         </TableCell>
                         <TableCell className={`py-0.5 text-right font-medium whitespace-nowrap ${transaction.type === "receita" ? "text-success" : "text-destructive"}`}>
                           {transaction.type === "receita" ? "+" : "-"}{formatCurrency(transaction.amount)}
@@ -924,6 +1278,9 @@ export default function Categorizacao() {
                             </SelectContent>
                           </Select>
                         </TableCell>
+                        <TableCell className="py-0.5 whitespace-nowrap text-xs truncate overflow-hidden">
+                          {getBankAccountName(transaction.bankAccountId)}
+                        </TableCell>
                         <TableCell className="py-0.5">
                           <div className="flex items-center gap-0.5">
                             <Button
@@ -931,29 +1288,36 @@ export default function Categorizacao() {
                               size="icon"
                               className="h-7 w-7"
                               onClick={() => handleCategorize(transaction.id)}
-                              disabled={!selection.categoryId || categorizeMutation.isPending}
+                              disabled={!selection.categoryId || categorizeMutation.isPending || categorizeBudgetBatchMutation.isPending}
                               data-testid={`button-categorize-${transaction.id}`}
                             >
                               <Check className="w-3.5 h-3.5 text-success" />
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => handleEditTransaction(transaction)}
-                              data-testid={`button-edit-${transaction.id}`}
-                            >
-                              <Pencil className="w-3.5 h-3.5 text-primary" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => { if (confirm("Excluir esta transacao?")) deleteTransactionMutation.mutate(transaction.id); }}
-                              data-testid={`button-delete-${transaction.id}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5 text-destructive" />
-                            </Button>
+                            {transaction.itemSource === "transaction" && (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() => {
+                                    const orig = transactions.find(t => t.id === transaction.id);
+                                    if (orig) handleEditTransaction(orig);
+                                  }}
+                                  data-testid={`button-edit-${transaction.id}`}
+                                >
+                                  <Pencil className="w-3.5 h-3.5 text-primary" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() => { if (confirm("Excluir esta transacao?")) deleteTransactionMutation.mutate(transaction.id); }}
+                                  data-testid={`button-delete-${transaction.id}`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -964,9 +1328,9 @@ export default function Categorizacao() {
                   <TableRow className="h-7 bg-muted/50 font-medium">
                     <TableCell className="py-0.5"></TableCell>
                     <TableCell colSpan={2} className="py-0.5 text-xs">
-                      {filteredTransactions.length} transacao(oes)
+                      {filteredTransactions.length} {dataSource === "planejamento" ? "item(ns)" : "transacao(oes)"}
                     </TableCell>
-                    <TableCell colSpan={4} className="py-0.5"></TableCell>
+                    <TableCell colSpan={5} className="py-0.5"></TableCell>
                     <TableCell className="py-0.5 text-right text-xs whitespace-nowrap">
                       <div className="flex flex-col gap-0.5">
                         <span className="text-success">+{formatCurrency(filteredTotals.receitas)}</span>

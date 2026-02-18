@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { filterCardBillPayments } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -124,8 +125,7 @@ export default function Parcelamentos() {
     const groups: InstallmentGroup[] = [];
     const groupedByInstallmentId = new Map<string, Transaction[]>();
 
-    transactions
-      .filter((t) => !t.isCardBillPayment)
+    filterCardBillPayments(transactions)
       .forEach((t) => {
         if (t.installmentTotal && t.installmentTotal > 1) {
           const groupKey = t.installmentGroupId || `${t.description}-${t.installmentTotal}`;
@@ -583,7 +583,7 @@ export default function Parcelamentos() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Todas</SelectItem>
-                  {categories.filter(c => c.type === "despesa").map((cat) => (
+                  {categories.filter(c => c.active !== false).map((cat) => (
                     <SelectItem key={cat.id} value={cat.id.toString()}>
                       {cat.name}
                     </SelectItem>
@@ -698,7 +698,7 @@ export default function Parcelamentos() {
                     <SelectValue placeholder="Categoria" />
                   </SelectTrigger>
                   <SelectContent>
-                    {categories.filter(c => c.type === "despesa").map((cat) => (
+                    {categories.filter(c => c.active !== false).map((cat) => (
                       <SelectItem key={cat.id} value={cat.id.toString()}>
                         {cat.name}
                       </SelectItem>

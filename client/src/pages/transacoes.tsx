@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { filterCardBillPayments } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -33,7 +34,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Pencil, Trash2, Search, TrendingUp, TrendingDown, ArrowUpDown, RotateCcw, CreditCard, Building2, ChevronUp, ChevronDown, PenLine, ChevronLeft, ChevronRight, FileDown } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, TrendingUp, TrendingDown, ArrowUpDown, RotateCcw, CreditCard, Building2, ChevronUp, ChevronDown, PenLine, ChevronLeft, ChevronRight, FileDown, AlertTriangle } from "lucide-react";
 import { CategoryIcon } from "@/components/category-icon";
 import { exportToExcel } from "@/lib/exportExcel";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -43,6 +44,9 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { PageHeader } from "@/components/page-header";
+import { useColumnWidths } from "@/hooks/use-column-widths";
+import { ResizeHandle } from "@/components/resize-handle";
+import { getCurrentYearMonth } from "@/components/month-navigator";
 
 const transactionFormSchema = z.object({
   description: z.string().min(1, "Descricao e obrigatoria"),
@@ -72,27 +76,32 @@ function formatCurrency(value: number | string) {
 }
 
 function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('pt-BR');
+  const d = new Date(date);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(2);
+  return `${dd}/${mm}/${yy}`;
 }
 
 export default function Transacoes() {
   const { toast } = useToast();
+  const defaultColWidths = { checkbox: 36, dtTrans: 72, vencFat: 72, descricao: 0, tipo: 44, status: 55, orig: 44, categoria: 90, subcategoria: 90, valor: 90, acoes: 60 };
+  const { colWidths, handleResizeStart } = useColumnWidths("transacoes", defaultColWidths);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterType, setFilterType] = useState<"all" | "receita" | "despesa">("all");
-  const [filterStatus, setFilterStatus] = useState<"all" | "prevista" | "realizada">("all");
+  const [filterStatus, setFilterStatus] = useState<"all" | "prevista" | "realizada">("realizada");
+  const [filterSource, setFilterSource] = useState<string>("all");
   const [filterCategoryId, setFilterCategoryId] = useState<string>("all");
   const [filterSubcategoryId, setFilterSubcategoryId] = useState<string>("all");
-  const [filterBeneficiaryId, setFilterBeneficiaryId] = useState<string>("all");
-  const [filterBankAccountId, setFilterBankAccountId] = useState<string>("all");
-  const currentYM = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; })();
+  const currentYM = getCurrentYearMonth();
   const [selectedMonth, setSelectedMonth] = useState<string | null>(currentYM);
   const handleMonthChange = (month: string | null) => {
     setSelectedMonth(month);
     setCurrentPage(1);
   };
-  const [sortColumn, setSortColumn] = useState<"date" | "description" | "amount" | "type" | "status" | "category" | "subcategory" | "beneficiary" | "installmentCurrent" | "installmentTotal">("date");
+  const [sortColumn, setSortColumn] = useState<"date" | "description" | "amount" | "type" | "status" | "category" | "subcategory" | "beneficiary">("date");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
@@ -100,6 +109,7 @@ export default function Transacoes() {
   // Estados para seleção e edição em massa
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkShortTitle, setBulkShortTitle] = useState("");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const [categoryModalOpen, setCategoryModalOpen] = useState(false);
   const [subcategoryModalOpen, setSubcategoryModalOpen] = useState(false);
@@ -150,7 +160,7 @@ export default function Transacoes() {
   const selectedType = form.watch("type");
   const selectedCategoryId = form.watch("categoryId");
 
-  const filteredCategories = categories.filter((c) => c.type === selectedType && c.active);
+  const filteredCategories = categories.filter((c) => c.active);
   const filteredSubcategories = subcategories.filter(
     (s) => s.categoryId === Number(selectedCategoryId) && s.active
   );
@@ -241,6 +251,21 @@ export default function Transacoes() {
     },
     onError: () => {
       toast({ title: "Erro ao atualizar titulo breve", variant: "destructive" });
+    },
+  });
+
+  const batchDeleteMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      return apiRequest("POST", "/api/transactions/delete-batch", { ids });
+    },
+    onSuccess: (_data, ids) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/transactions"] });
+      toast({ title: `${ids.length} transacoes excluidas` });
+      setSelectedIds(new Set());
+      setShowDeleteConfirm(false);
+    },
+    onError: () => {
+      toast({ title: "Erro ao excluir transacoes", variant: "destructive" });
     },
   });
 
@@ -367,8 +392,8 @@ export default function Transacoes() {
       return (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge variant="outline" className="text-xs">
-              <CreditCard className="w-3 h-3" />
+            <Badge variant="outline" className="text-xs border-purple-400 dark:border-purple-600">
+              <CreditCard className="w-3 h-3 text-purple-600 dark:text-purple-400" />
             </Badge>
           </TooltipTrigger>
           <TooltipContent>Cartao de Credito</TooltipContent>
@@ -379,8 +404,8 @@ export default function Transacoes() {
       return (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Badge variant="outline" className="text-xs">
-              <Building2 className="w-3 h-3" />
+            <Badge variant="outline" className="text-xs border-blue-400 dark:border-blue-600">
+              <Building2 className="w-3 h-3 text-blue-600 dark:text-blue-400" />
             </Badge>
           </TooltipTrigger>
           <TooltipContent>Conta Corrente</TooltipContent>
@@ -391,7 +416,7 @@ export default function Transacoes() {
       <Tooltip>
         <TooltipTrigger asChild>
           <Badge variant="outline" className="text-xs">
-            <PenLine className="w-3 h-3" />
+            <PenLine className="w-3 h-3 text-muted-foreground" />
           </Badge>
         </TooltipTrigger>
         <TooltipContent>Manual</TooltipContent>
@@ -399,8 +424,8 @@ export default function Transacoes() {
     );
   };
 
-  const filteredTransactions = transactions
-    .filter((t) => !t.isCardBillPayment)
+  const visibleTransactions = filterCardBillPayments(transactions);
+  const filteredTransactions = visibleTransactions
     .filter((t) => {
       const searchLower = searchTerm.toLowerCase();
       const amountStr = Math.abs(Number(t.amount)).toFixed(2);
@@ -412,13 +437,12 @@ export default function Transacoes() {
         amountFormatted.includes(searchTerm);
       const matchesType = filterType === "all" || t.type === filterType;
       const matchesStatus = filterStatus === "all" || t.status === filterStatus;
+      const matchesSource = filterSource === "all" || t.source === filterSource;
       const matchesCategory = filterCategoryId === "all" || (filterCategoryId === "empty" ? !t.categoryId : t.categoryId === Number(filterCategoryId));
       const matchesSubcategory = filterSubcategoryId === "all" || (filterSubcategoryId === "empty" ? !t.subcategoryId : t.subcategoryId === Number(filterSubcategoryId));
-      const matchesBeneficiary = filterBeneficiaryId === "all" || (filterBeneficiaryId === "empty" ? !t.beneficiaryId : t.beneficiaryId === Number(filterBeneficiaryId));
-      const matchesBankAccount = filterBankAccountId === "all" || t.bankAccountId === Number(filterBankAccountId);
       const matchesMonth = !selectedMonth || (t.transactionDate || t.date).startsWith(selectedMonth);
       
-      return matchesSearch && matchesType && matchesStatus && matchesCategory && matchesSubcategory && matchesBeneficiary && matchesBankAccount && matchesMonth;
+      return matchesSearch && matchesType && matchesStatus && matchesSource && matchesCategory && matchesSubcategory && matchesMonth;
     })
     .sort((a, b) => {
       let comparison = 0;
@@ -455,12 +479,6 @@ export default function Transacoes() {
           const benA = beneficiaries.find((ben) => ben.id === a.beneficiaryId)?.name || "";
           const benB = beneficiaries.find((ben) => ben.id === b.beneficiaryId)?.name || "";
           comparison = benA.localeCompare(benB);
-          break;
-        case "installmentCurrent":
-          comparison = (a.installmentCurrent || 1) - (b.installmentCurrent || 1);
-          break;
-        case "installmentTotal":
-          comparison = (a.installmentTotal || 1) - (b.installmentTotal || 1);
           break;
       }
       return sortDirection === "asc" ? comparison : -comparison;
@@ -728,8 +746,8 @@ export default function Transacoes() {
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="prevista">Prevista</SelectItem>
-                            <SelectItem value="realizada">Realizada</SelectItem>
+                            <SelectItem value="prevista">Planejado</SelectItem>
+                            <SelectItem value="realizada">Realizado</SelectItem>
                           </SelectContent>
                         </Select>
                         <FormMessage />
@@ -953,7 +971,7 @@ export default function Transacoes() {
               <span className="text-xs font-medium">Transacoes</span>
             </div>
             <span className="text-lg font-bold" data-testid="text-count">{filteredTransactions.length}</span>
-            <span className="text-xs text-muted-foreground ml-1">de {transactions.filter(t => !t.isCardBillPayment).length}</span>
+            <span className="text-xs text-muted-foreground ml-1">de {visibleTransactions.length}</span>
           </CardContent>
         </Card>
       </div>
@@ -987,15 +1005,29 @@ export default function Transacoes() {
               </Select>
             </div>
             <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Status</Label>
+              <Label className="text-xs text-muted-foreground">Visao</Label>
               <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v as any); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[90px] h-8 text-xs" data-testid="filter-status">
-                  <SelectValue placeholder="Status" />
+                <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-status">
+                  <SelectValue placeholder="Visao" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Ambos</SelectItem>
+                  <SelectItem value="realizada">Realizado</SelectItem>
+                  <SelectItem value="prevista">Planejado</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-muted-foreground">Orig.</Label>
+              <Select value={filterSource} onValueChange={(v) => { setFilterSource(v); setCurrentPage(1); }}>
+                <SelectTrigger className="w-[90px] h-8 text-xs" data-testid="filter-source">
+                  <SelectValue placeholder="Orig." />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="prevista">Previstas</SelectItem>
-                  <SelectItem value="realizada">Realizadas</SelectItem>
+                  <SelectItem value="manual">Manual</SelectItem>
+                  <SelectItem value="cartao">Cartao</SelectItem>
+                  <SelectItem value="conta_corrente">Cta.Corr.</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1008,9 +1040,9 @@ export default function Transacoes() {
                 <SelectContent>
                   <SelectItem value="all">Todas</SelectItem>
                   <SelectItem value="empty">Vazio</SelectItem>
-                  {categories.filter(c => c.active).map((c) => (
+                  {categories.filter(c => c.active).sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
                     <SelectItem key={c.id} value={String(c.id)}>
-                      {c.name} ({c.type === "receita" ? "rec." : "desp."})
+                      {c.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -1031,37 +1063,8 @@ export default function Transacoes() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Beneficiario</Label>
-              <Select value={filterBeneficiaryId} onValueChange={(v) => { setFilterBeneficiaryId(v); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-beneficiary">
-                  <SelectValue placeholder="Todos" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="empty">Vazio</SelectItem>
-                  {beneficiaries.filter(b => b.active).map((b) => (
-                    <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Pgto</Label>
-              <Select value={filterBankAccountId} onValueChange={(v) => { setFilterBankAccountId(v); setCurrentPage(1); }}>
-                <SelectTrigger className="w-[90px] h-8 text-xs" data-testid="filter-bank-account">
-                  <SelectValue placeholder="Todas" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas</SelectItem>
-                  {bankAccounts.filter(a => a.active).map((a) => (
-                    <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {(filterCategoryId !== "all" || filterSubcategoryId !== "all" || filterBeneficiaryId !== "all" || filterBankAccountId !== "all") && (
-              <Button variant="ghost" size="sm" className="self-end" onClick={() => { setFilterCategoryId("all"); setFilterSubcategoryId("all"); setFilterBeneficiaryId("all"); setFilterBankAccountId("all"); setCurrentPage(1); }}>
+            {(filterCategoryId !== "all" || filterSubcategoryId !== "all" || filterSource !== "all") && (
+              <Button variant="ghost" size="sm" className="self-end" onClick={() => { setFilterSource("all"); setFilterCategoryId("all"); setFilterSubcategoryId("all"); setCurrentPage(1); }}>
                 Limpar
               </Button>
             )}
@@ -1082,48 +1085,55 @@ export default function Transacoes() {
                 <Badge variant="secondary">
                   {selectedIds.size} selecionadas
                 </Badge>
-                <div className="flex items-center gap-2">
-                  <Input
-                    placeholder="Titulo breve..."
-                    value={bulkShortTitle}
-                    onChange={(e) => setBulkShortTitle(e.target.value)}
-                    className="w-[200px]"
-                    data-testid="input-bulk-short-title"
-                  />
-                  <Button
-                    onClick={handleBulkShortTitleUpdate}
-                    disabled={updateShortTitleBatchMutation.isPending || !bulkShortTitle.trim()}
-                    data-testid="button-apply-bulk-short-title"
-                  >
-                    Aplicar Titulo
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => { setSelectedIds(new Set()); setBulkShortTitle(""); }}
-                    data-testid="button-clear-selection"
-                  >
-                    Limpar Selecao
-                  </Button>
-                </div>
+                <Input
+                  placeholder="Titulo breve..."
+                  value={bulkShortTitle}
+                  onChange={(e) => setBulkShortTitle(e.target.value)}
+                  className="w-[200px]"
+                  data-testid="input-bulk-short-title"
+                />
+                <Button
+                  size="sm"
+                  onClick={handleBulkShortTitleUpdate}
+                  disabled={updateShortTitleBatchMutation.isPending || !bulkShortTitle.trim()}
+                  data-testid="button-apply-bulk-short-title"
+                >
+                  Aplicar Titulo
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={batchDeleteMutation.isPending}
+                  data-testid="button-bulk-delete"
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-1" />
+                  Excluir Selecionadas
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setSelectedIds(new Set()); setBulkShortTitle(""); }}
+                  data-testid="button-clear-selection"
+                >
+                  Limpar Selecao
+                </Button>
               </div>
             )}
             <div className="overflow-hidden">
               <Table className="text-sm table-fixed w-full">
                 <colgroup>
-                  <col style={{ width: "36px" }} />
-                  <col style={{ width: "72px" }} />
-                  <col style={{ width: "72px" }} />
-                  <col />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "44px" }} />
-                  <col style={{ width: "36px" }} />
-                  <col style={{ width: "36px" }} />
-                  <col style={{ width: "50px" }} />
-                  <col style={{ width: "50px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "60px" }} />
+                  <col style={{ width: colWidths.checkbox ? `${colWidths.checkbox}px` : undefined }} />
+                  <col style={{ width: colWidths.dtTrans ? `${colWidths.dtTrans}px` : undefined }} />
+                  <col style={{ width: colWidths.vencFat ? `${colWidths.vencFat}px` : undefined }} />
+                  <col style={colWidths.descricao ? { width: `${colWidths.descricao}px` } : undefined} />
+                  <col style={{ width: colWidths.tipo ? `${colWidths.tipo}px` : undefined }} />
+                  <col style={{ width: colWidths.status ? `${colWidths.status}px` : undefined }} />
+                  <col style={{ width: colWidths.orig ? `${colWidths.orig}px` : undefined }} />
+                  <col style={{ width: colWidths.categoria ? `${colWidths.categoria}px` : undefined }} />
+                  <col style={{ width: colWidths.subcategoria ? `${colWidths.subcategoria}px` : undefined }} />
+                  <col style={{ width: colWidths.valor ? `${colWidths.valor}px` : undefined }} />
+                  <col style={{ width: colWidths.acoes ? `${colWidths.acoes}px` : undefined }} />
                 </colgroup>
                 <TableHeader>
                   <TableRow className="h-9">
@@ -1134,39 +1144,46 @@ export default function Transacoes() {
                         data-testid="checkbox-select-all"
                       />
                     </TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="date">Dt. Trans.</SortHeader>
+                    <TableHead className="py-1.5 relative">
+                      <SortHeader column="date">Dt.Trans.</SortHeader>
+                      <ResizeHandle col="dtTrans" onResizeStart={handleResizeStart} />
                     </TableHead>
-                    <TableHead className="py-1.5">Dt. Pgto.</TableHead>
-                    <TableHead className="py-1.5">
+                    <TableHead className="py-1.5 relative">
+                      Venc.Fat.
+                      <ResizeHandle col="vencFat" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1.5 relative">
                       <SortHeader column="description">Descricao</SortHeader>
+                      <ResizeHandle col="descricao" onResizeStart={handleResizeStart} />
                     </TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="category">Categoria</SortHeader>
-                    </TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="subcategory">Subcateg.</SortHeader>
-                    </TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="beneficiary">Benefic.</SortHeader>
-                    </TableHead>
-                    <TableHead className="py-1.5">Orig.</TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="installmentCurrent">Pc</SortHeader>
-                    </TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="installmentTotal">Tt</SortHeader>
-                    </TableHead>
-                    <TableHead className="py-1.5">
+                    <TableHead className="py-1.5 relative">
                       <SortHeader column="type">Tipo</SortHeader>
+                      <ResizeHandle col="tipo" onResizeStart={handleResizeStart} />
                     </TableHead>
-                    <TableHead className="py-1.5">
-                      <SortHeader column="status">Status</SortHeader>
+                    <TableHead className="py-1.5 relative">
+                      <SortHeader column="status">Visao</SortHeader>
+                      <ResizeHandle col="status" onResizeStart={handleResizeStart} />
                     </TableHead>
-                    <TableHead className="py-1.5 text-right">
+                    <TableHead className="py-1.5 relative">
+                      Orig.
+                      <ResizeHandle col="orig" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1.5 relative">
+                      <SortHeader column="category">Cat.</SortHeader>
+                      <ResizeHandle col="categoria" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1.5 relative">
+                      <SortHeader column="subcategory">Subcateg.</SortHeader>
+                      <ResizeHandle col="subcategoria" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1.5 text-right relative">
                       <SortHeader column="amount">Valor</SortHeader>
+                      <ResizeHandle col="valor" onResizeStart={handleResizeStart} />
                     </TableHead>
-                    <TableHead className="py-1.5">Acoes</TableHead>
+                    <TableHead className="py-1.5 relative">
+                      Acoes
+                      <ResizeHandle col="acoes" onResizeStart={handleResizeStart} />
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1180,7 +1197,7 @@ export default function Transacoes() {
                         />
                       </TableCell>
                       <TableCell className="py-1.5 text-xs whitespace-nowrap">{transaction.transactionDate ? formatDate(transaction.transactionDate) : formatDate(transaction.date)}</TableCell>
-                      <TableCell className="py-1.5 text-xs whitespace-nowrap">{transaction.paymentDate ? formatDate(transaction.paymentDate) : formatDate(transaction.date)}</TableCell>
+                      <TableCell className="py-1.5 text-xs whitespace-nowrap">{transaction.paymentDate ? formatDate(transaction.paymentDate) : "-"}</TableCell>
                       <TableCell className="py-1.5 overflow-hidden">
                         <div className="flex items-center gap-1 min-w-0">
                           <Tooltip>
@@ -1205,6 +1222,19 @@ export default function Transacoes() {
                           )}
                         </div>
                       </TableCell>
+                      <TableCell className="py-1.5">
+                        <Badge variant="outline" className={`text-xs font-bold ${transaction.type === "receita" ? "border-green-600 text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950" : "border-red-600 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950"}`}>
+                          {transaction.type === "receita" ? "R" : "D"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="py-1.5">
+                        <Badge variant="outline" className={`text-xs font-bold ${transaction.status === "realizada" ? "border-emerald-700 text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950" : "border-blue-700 text-blue-800 dark:text-blue-300 bg-blue-50 dark:bg-blue-950"}`}>
+                          {transaction.status === "realizada" ? "Real" : "Plan"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="py-1.5">
+                        {getSourceBadge(transaction.source)}
+                      </TableCell>
                       <TableCell className="py-1.5 overflow-hidden">
                         {(() => {
                           const cat = getCategory(transaction.categoryId);
@@ -1215,32 +1245,6 @@ export default function Transacoes() {
                       </TableCell>
                       <TableCell className="py-1.5 text-xs text-muted-foreground truncate overflow-hidden">
                         {getSubcategoryName(transaction.subcategoryId)}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-xs text-muted-foreground truncate overflow-hidden">
-                        {getBeneficiaryName(transaction.beneficiaryId)}
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        {getSourceBadge(transaction.source)}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-xs text-center">
-                        {transaction.installmentCurrent || 1}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-xs text-center">
-                        {transaction.installmentTotal || 1}
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        <Badge variant={transaction.type === "receita" ? "default" : "secondary"} className="text-xs">
-                          {transaction.type === "receita" ? (
-                            <TrendingUp className="w-3 h-3" />
-                          ) : (
-                            <TrendingDown className="w-3 h-3" />
-                          )}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        <Badge variant={transaction.status === "realizada" ? "default" : "outline"} className="text-xs">
-                          {transaction.status === "realizada" ? "Real" : "Prev"}
-                        </Badge>
                       </TableCell>
                       <TableCell className={`py-1.5 text-right font-medium text-sm whitespace-nowrap ${transaction.type === "receita" ? "text-success" : "text-destructive"}`}>
                         {transaction.type === "receita" ? "+" : "-"}{formatCurrency(transaction.amount)}
@@ -1272,10 +1276,10 @@ export default function Transacoes() {
                 </TableBody>
                 <TableFooter>
                   <TableRow className="h-9 bg-muted/50 font-medium">
-                    <TableCell colSpan={3} className="py-1.5 text-xs">
+                    <TableCell colSpan={4} className="py-1.5 text-xs">
                       {filteredTransactions.length} transacao(oes)
                     </TableCell>
-                    <TableCell colSpan={9} className="py-1.5"></TableCell>
+                    <TableCell colSpan={6} className="py-1.5"></TableCell>
                     <TableCell className="py-1.5 text-right text-xs whitespace-nowrap">
                       <div className="flex flex-col gap-0.5">
                         <span className="text-success">+{formatCurrency(filteredTotals.receitas)}</span>
@@ -1404,6 +1408,33 @@ export default function Transacoes() {
                 {createSubcategoryMutation.isPending ? "Salvando..." : "Salvar"}
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-destructive" />
+              Confirmar Exclusao em Massa
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Tem certeza que deseja excluir <strong>{selectedIds.size}</strong> transacoes selecionadas? Esta acao nao pode ser desfeita.
+          </p>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setShowDeleteConfirm(false)} data-testid="button-cancel-bulk-delete">
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => batchDeleteMutation.mutate(Array.from(selectedIds))}
+              disabled={batchDeleteMutation.isPending}
+              data-testid="button-confirm-bulk-delete"
+            >
+              {batchDeleteMutation.isPending ? "Excluindo..." : "Excluir"}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

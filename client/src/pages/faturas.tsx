@@ -21,15 +21,19 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { CreditCard, AlertTriangle, CheckCircle, Clock, RotateCcw, ChevronUp, ChevronDown, Search, ChevronLeft, ChevronRight, Building2, PenLine, Repeat } from "lucide-react";
+import { CreditCard, AlertTriangle, CheckCircle, Clock, RotateCcw, ChevronUp, ChevronDown, Search, ChevronLeft, ChevronRight, Building2, PenLine, Repeat, Trash2 } from "lucide-react";
 import { CategoryIcon } from "@/components/category-icon";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, Legend } from "recharts";
-import type { Transaction, Category } from "@shared/schema";
+import type { Transaction, Category, Subcategory } from "@shared/schema";
 import { PageHeader } from "@/components/page-header";
+import { useColumnWidths } from "@/hooks/use-column-widths";
+import { ResizeHandle } from "@/components/resize-handle";
+import { getCurrentYearMonth } from "@/components/month-navigator";
 
 function formatCurrency(value: number | string) {
   const numValue = typeof value === "string" ? parseFloat(value) : value;
@@ -40,7 +44,11 @@ function formatCurrency(value: number | string) {
 }
 
 function formatDate(date: string) {
-  return new Date(date).toLocaleDateString("pt-BR");
+  const d = new Date(date);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(2);
+  return `${dd}/${mm}/${yy}`;
 }
 
 function getMonthName(month: string) {
@@ -49,14 +57,25 @@ function getMonthName(month: string) {
   return `${monthNames[parseInt(m) - 1]}/${year}`;
 }
 
+type SortColumn = "date" | "description" | "category" | "subcategory" | "status" | "type" | "amount";
+
 export default function Faturas() {
   const { toast } = useToast();
-  const [selectedMonth, setSelectedMonth] = useState<string>("all");
+  const currentYM = getCurrentYearMonth();
+  const [selectedMonth, setSelectedMonth] = useState<string | null>(currentYM);
   const [searchTerm, setSearchTerm] = useState("");
-  const [sortColumn, setSortColumn] = useState<"date" | "description" | "category" | "status" | "amount">("date");
+  const [filterType, setFilterType] = useState<"all" | "receita" | "despesa">("all");
+  const [filterStatus, setFilterStatus] = useState<"all" | "realizada" | "prevista">("all");
+  const [filterCategoryId, setFilterCategoryId] = useState<string>("all");
+  const [filterSubcategoryId, setFilterSubcategoryId] = useState<string>("all");
+  const [sortColumn, setSortColumn] = useState<SortColumn>("date");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 15;
+  const [hiddenLineSeries, setHiddenLineSeries] = useState<Set<string>>(new Set());
+  const itemsPerPage = 10;
+
+  const defaultColWidths = { dtTrans: 72, vencFat: 72, descricao: 0, tipo: 44, status: 55, orig: 44, categoria: 90, subcategoria: 90, valor: 90, acoes: 60 };
+  const { colWidths, handleResizeStart } = useColumnWidths("faturas", defaultColWidths);
 
   const { data: transactions = [], isLoading } = useQuery<Transaction[]>({
     queryKey: ["/api/transactions"],
@@ -66,7 +85,7 @@ export default function Faturas() {
     queryKey: ["/api/categories"],
   });
 
-  const { data: subcategories = [] } = useQuery<{ id: number; name: string; categoryId: number }[]>({
+  const { data: subcategories = [] } = useQuery<Subcategory[]>({
     queryKey: ["/api/subcategories"],
   });
 
@@ -83,12 +102,27 @@ export default function Faturas() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      return apiRequest("DELETE", `/api/transactions/${id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/transactions"] });
+      toast({ title: "Transacao excluida" });
+    },
+  });
+
   const cardTransactions = transactions.filter((t) => t.source === "cartao");
   
   const billMonths = Array.from(new Set(cardTransactions.map((t) => t.cardBillMonth).filter(Boolean)))
     .sort((a, b) => (a || "").localeCompare(b || ""));
 
-  const handleSort = (column: typeof sortColumn) => {
+  const handleMonthChange = (month: string | null) => {
+    setSelectedMonth(month);
+    setCurrentPage(1);
+  };
+
+  const handleSort = (column: SortColumn) => {
     if (sortColumn === column) {
       setSortDirection(sortDirection === "asc" ? "desc" : "asc");
     } else {
@@ -98,19 +132,13 @@ export default function Faturas() {
     setCurrentPage(1);
   };
 
-  const SortableHeader = ({ column, children, className = "" }: { column: typeof sortColumn; children: React.ReactNode; className?: string }) => (
-    <TableHead 
-      className={`cursor-pointer select-none ${className}`}
-      onClick={() => handleSort(column)}
-      data-testid={`header-sort-${column}`}
-    >
-      <div className={`flex items-center gap-1 ${className.includes("text-right") ? "justify-end" : ""}`}>
-        {children}
-        {sortColumn === column ? (
-          sortDirection === "asc" ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
-        ) : null}
-      </div>
-    </TableHead>
+  const SortHeader = ({ column, children }: { column: SortColumn; children: React.ReactNode }) => (
+    <span className="flex items-center gap-0.5 cursor-pointer select-none" onClick={() => handleSort(column)}>
+      {children}
+      {sortColumn === column ? (
+        sortDirection === "asc" ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
+      ) : null}
+    </span>
   );
 
   const getCategory = (categoryId: number | null) => {
@@ -118,41 +146,65 @@ export default function Faturas() {
     return categories.find((c) => c.id === categoryId) || null;
   };
 
-  const getCategoryName = (categoryId: number | null) => {
-    return getCategory(categoryId)?.name || "-";
-  };
-
   const getSubcategoryName = (subcategoryId: number | null) => {
     if (!subcategoryId) return "-";
-    const subcategory = subcategories.find((s) => s.id === subcategoryId);
-    return subcategory?.name || "-";
+    return subcategories.find((s) => s.id === subcategoryId)?.name || "-";
   };
 
-  const getSourceIcon = (source: string | null) => {
-    switch (source) {
-      case "cartao":
-        return <CreditCard className="w-3 h-3" />;
-      case "conta_corrente":
-        return <Building2 className="w-3 h-3" />;
-      default:
-        return <PenLine className="w-3 h-3" />;
+  const getSourceBadge = (source: string | null) => {
+    if (source === "cartao") {
+      return (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="outline" className="text-xs border-purple-400 dark:border-purple-600">
+              <CreditCard className="w-3 h-3 text-purple-600 dark:text-purple-400" />
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>Cartao de Credito</TooltipContent>
+        </Tooltip>
+      );
     }
-  };
-
-  const getSourceLabel = (source: string | null) => {
-    switch (source) {
-      case "cartao":
-        return "Cartao de Credito";
-      case "conta_corrente":
-        return "Conta Corrente";
-      default:
-        return "Manual";
+    if (source === "conta_corrente") {
+      return (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="outline" className="text-xs border-blue-400 dark:border-blue-600">
+              <Building2 className="w-3 h-3 text-blue-600 dark:text-blue-400" />
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>Conta Corrente</TooltipContent>
+        </Tooltip>
+      );
     }
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="outline" className="text-xs">
+            <PenLine className="w-3 h-3 text-muted-foreground" />
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>Manual</TooltipContent>
+      </Tooltip>
+    );
   };
 
-  const filteredTransactions = (selectedMonth === "all"
-    ? cardTransactions
-    : cardTransactions.filter((t) => t.cardBillMonth === selectedMonth))
+  const filteredTransactions = cardTransactions
+    .filter((t) => {
+      if (!selectedMonth) return true;
+      return t.cardBillMonth === selectedMonth;
+    })
+    .filter((t) => filterType === "all" || t.type === filterType)
+    .filter((t) => filterStatus === "all" || t.status === filterStatus)
+    .filter((t) => {
+      if (filterCategoryId === "all") return true;
+      if (filterCategoryId === "empty") return !t.categoryId;
+      return String(t.categoryId) === filterCategoryId;
+    })
+    .filter((t) => {
+      if (filterSubcategoryId === "all") return true;
+      if (filterSubcategoryId === "empty") return !t.subcategoryId;
+      return String(t.subcategoryId) === filterSubcategoryId;
+    })
     .filter((t) => {
       if (!searchTerm) return true;
       const search = searchTerm.toLowerCase();
@@ -174,12 +226,20 @@ export default function Faturas() {
           bVal = (b.shortTitle || b.description).toLowerCase();
           break;
         case "category":
-          aVal = getCategoryName(a.categoryId).toLowerCase();
-          bVal = getCategoryName(b.categoryId).toLowerCase();
+          aVal = (getCategory(a.categoryId)?.name || "").toLowerCase();
+          bVal = (getCategory(b.categoryId)?.name || "").toLowerCase();
+          break;
+        case "subcategory":
+          aVal = getSubcategoryName(a.subcategoryId).toLowerCase();
+          bVal = getSubcategoryName(b.subcategoryId).toLowerCase();
           break;
         case "status":
           aVal = a.status;
           bVal = b.status;
+          break;
+        case "type":
+          aVal = a.type;
+          bVal = b.type;
           break;
         case "amount":
           const aAmount = typeof a.amount === 'string' ? parseFloat(a.amount) : a.amount;
@@ -204,11 +264,8 @@ export default function Faturas() {
   const filteredTotals = filteredTransactions.reduce(
     (acc, t) => {
       const amount = Math.abs(parseFloat(String(t.amount)));
-      if (t.type === "receita") {
-        acc.receitas += amount;
-      } else {
-        acc.despesas += amount;
-      }
+      if (t.type === "receita") acc.receitas += amount;
+      else acc.despesas += amount;
       return acc;
     },
     { receitas: 0, despesas: 0 }
@@ -218,7 +275,6 @@ export default function Faturas() {
   const billsByMonth = billMonths.reduce((acc, month) => {
     if (!month) return acc;
     const monthTxs = cardTransactions.filter((t) => t.cardBillMonth === month);
-    // Total da fatura = despesas - estornos (estornos sao receitas como contestacoes de fraude)
     const totalDespesas = monthTxs
       .filter((t) => t.type === "despesa")
       .reduce((sum, t) => sum + parseFloat(String(t.amount)), 0);
@@ -226,12 +282,10 @@ export default function Faturas() {
       .filter((t) => t.type === "receita" || t.isRefund)
       .reduce((sum, t) => sum + parseFloat(String(t.amount)), 0);
     const isPast = monthTxs.every((t) => t.status === "realizada");
-    // Valor liquido da fatura = despesas - estornos
     acc[month] = { total: totalDespesas - totalEstornos, estornos: totalEstornos, count: monthTxs.length, isPast };
     return acc;
   }, {} as Record<string, { total: number; estornos: number; count: number; isPast: boolean }>);
 
-  // Calcular totais considerando estornos
   const realizedDespesas = cardTransactions
     .filter((t) => t.status === "realizada" && t.type === "despesa")
     .reduce((sum, t) => sum + parseFloat(String(t.amount)), 0);
@@ -250,7 +304,6 @@ export default function Faturas() {
 
   const fraudSuspectCount = cardTransactions.filter((t) => t.isFraudSuspect).length;
 
-  // Parcelamentos futuros: agrupar por installmentGroupId e mostrar resumo
   const futureInstallments = cardTransactions
     .filter((t) => t.installmentGroupId && t.installmentTotal && t.installmentTotal > 1 && t.status === "prevista")
     .reduce((acc, t) => {
@@ -296,495 +349,504 @@ export default function Faturas() {
 
   return (
     <div>
-      <PageHeader title="Visao Cartao" subtitle="Visualize e gerencie suas faturas de cartao de credito">
-        <Select value={selectedMonth} onValueChange={setSelectedMonth}>
-          <SelectTrigger className="w-[180px]" data-testid="select-month">
-            <SelectValue placeholder="Selecione o mes" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">Todas as Faturas</SelectItem>
-            {billMonths.map((month) => (
-              <SelectItem key={month} value={month || ""}>
-                {getMonthName(month || "")}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </PageHeader>
-      <div className="px-4 py-3 space-y-6">
-      <div className="grid gap-4 md:grid-cols-4">
-        <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-success/10">
-                <CheckCircle className="w-5 h-5 text-success" />
+      <PageHeader title="Visao Cartao" subtitle="Faturas de cartao de credito" selectedMonth={selectedMonth} onMonthChange={handleMonthChange} />
+      <div className="px-4 py-3 space-y-3">
+        <div className="grid gap-2 grid-cols-2 lg:grid-cols-4">
+          <Card>
+            <CardContent className="p-3">
+              <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                <CheckCircle className="h-3.5 w-3.5 text-success" />
+                <span className="text-xs font-medium">Realizado</span>
               </div>
-              <div>
-                <p className="text-sm text-muted-foreground">Realizado</p>
-                <p className="text-xl font-bold text-success">{formatCurrency(totalRealized)}</p>
+              <span className="text-lg font-bold text-success" data-testid="text-realizado">{formatCurrency(totalRealized)}</span>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3">
+              <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                <Clock className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                <span className="text-xs font-medium">Previsto</span>
               </div>
-            </div>
-          </CardContent>
-        </Card>
+              <span className="text-lg font-bold text-blue-600 dark:text-blue-400" data-testid="text-previsto">{formatCurrency(totalPlanned)}</span>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3">
+              <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                <CreditCard className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="text-xs font-medium">Total Faturas</span>
+              </div>
+              <span className="text-lg font-bold" data-testid="text-total-faturas">{billMonths.length}</span>
+              <span className="text-xs text-muted-foreground ml-1">({cardTransactions.length} itens)</span>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3">
+              <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                <AlertTriangle className={`h-3.5 w-3.5 ${fraudSuspectCount > 0 ? "text-destructive" : "text-muted-foreground"}`} />
+                <span className="text-xs font-medium">Fraudes</span>
+              </div>
+              <span className={`text-lg font-bold ${fraudSuspectCount > 0 ? "text-destructive" : ""}`} data-testid="text-fraudes">{fraudSuspectCount}</span>
+            </CardContent>
+          </Card>
+        </div>
 
         <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-blue-100 dark:bg-blue-900">
-                <Clock className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">Previsto</p>
-                <p className="text-xl font-bold text-blue-600 dark:text-blue-400">{formatCurrency(totalPlanned)}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-muted">
-                <CreditCard className="w-5 h-5 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">Total Faturas</p>
-                <p className="text-xl font-bold">{billMonths.length}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${fraudSuspectCount > 0 ? "bg-destructive/10" : "bg-muted"}`}>
-                <AlertTriangle className={`w-5 h-5 ${fraudSuspectCount > 0 ? "text-destructive" : "text-muted-foreground"}`} />
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">Em Analise Fraude</p>
-                <p className={`text-xl font-bold ${fraudSuspectCount > 0 ? "text-destructive" : ""}`}>{fraudSuspectCount}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Gráfico de Evolução Mensal das Faturas */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            Evolução das Faturas
-            <span className="text-xs font-normal text-muted-foreground">(linha pontilhada = previsto)</span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {billMonths.length > 0 ? (
-            (() => {
-              // Preparar dados do gráfico separando realizados e previstos
-              const chartData = billMonths.map(month => {
-                if (!month) return null;
-                const billData = billsByMonth[month];
-                if (!billData) return null;
-                
-                return {
-                  month: getMonthName(month),
-                  valorRealizado: billData.isPast ? billData.total : undefined,
-                  valorPrevisto: !billData.isPast ? billData.total : undefined,
-                  estornos: billData.estornos > 0 ? billData.estornos : undefined,
-                };
-              }).filter(Boolean);
-              
-              // Encontrar o índice do último mês realizado para conectar as linhas
-              const lastRealizedIdx = chartData.findIndex(d => d?.valorPrevisto !== undefined) - 1;
-              if (lastRealizedIdx >= 0 && chartData[lastRealizedIdx] && chartData[lastRealizedIdx + 1]) {
-                // Copiar o valor realizado para o primeiro previsto para conectar
-                chartData[lastRealizedIdx + 1]!.valorPrevisto = chartData[lastRealizedIdx]!.valorRealizado;
-              }
-              
-              return (
-                <ResponsiveContainer width="100%" height={250}>
-                  <LineChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                    <XAxis dataKey="month" className="text-xs" />
-                    <YAxis 
-                      tickFormatter={(value) => `R$ ${(value / 1000).toFixed(0)}k`}
-                      className="text-xs"
-                    />
-                    <RechartsTooltip 
-                      formatter={(value: number, name: string) => {
-                        const labels: Record<string, string> = {
-                          valorRealizado: 'Fatura Realizada',
-                          valorPrevisto: 'Fatura Prevista',
-                          estornos: 'Estornos',
-                        };
-                        return [formatCurrency(value), labels[name] || name];
-                      }}
-                      contentStyle={{ 
-                        backgroundColor: 'hsl(var(--card))', 
-                        border: '1px solid hsl(var(--border))',
-                        borderRadius: '6px'
-                      }}
-                    />
-                    <Legend 
-                      formatter={(value: string) => {
-                        const labels: Record<string, string> = {
-                          valorRealizado: 'Realizado',
-                          valorPrevisto: 'Previsto',
-                          estornos: 'Estornos',
-                        };
-                        return labels[value] || value;
-                      }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="valorRealizado"
-                      stroke="#10B981"
-                      strokeWidth={2}
-                      dot={{ fill: '#10B981', strokeWidth: 2, r: 4 }}
-                      activeDot={{ r: 6 }}
-                      connectNulls
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="valorPrevisto"
-                      stroke="#3B82F6"
-                      strokeWidth={2}
-                      strokeDasharray="5 5"
-                      dot={{ fill: '#3B82F6', strokeWidth: 2, r: 4, strokeDasharray: '' }}
-                      activeDot={{ r: 6 }}
-                      connectNulls
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="estornos"
-                      stroke="#F59E0B"
-                      strokeWidth={1}
-                      strokeDasharray="3 3"
-                      dot={{ fill: '#F59E0B', strokeWidth: 1, r: 3 }}
-                      connectNulls
-                      legendType="line"
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              );
-            })()
-          ) : (
-            <div className="h-[250px] flex items-center justify-center text-muted-foreground">
-              <p>Nenhum dado disponivel</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-4 md:grid-cols-4 lg:grid-cols-6">
-        {billMonths.map((month) => {
-          const info = billsByMonth[month || ""];
-          if (!info) return null;
-          return (
-            <Card
-              key={month}
-              className={`cursor-pointer transition-colors ${selectedMonth === month ? "ring-2 ring-primary" : ""}`}
-              onClick={() => setSelectedMonth(month || "all")}
-            >
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium">{getMonthName(month || "")}</span>
-                  <Badge variant={info.isPast ? "default" : "outline"} className="text-xs">
-                    {info.isPast ? "Pago" : "Aberto"}
-                  </Badge>
-                </div>
-                <p className="text-lg font-bold">{formatCurrency(info.total)}</p>
-                <p className="text-xs text-muted-foreground">{info.count} itens</p>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between flex-wrap gap-4">
-            <CardTitle className="flex items-center gap-2">
-              <CreditCard className="w-5 h-5" />
-              {selectedMonth === "all" ? "Todas as Transacoes" : `Fatura ${getMonthName(selectedMonth)}`}
-            </CardTitle>
-            <div className="relative flex-1 min-w-[200px] max-w-[300px]">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
-              <Input
-                placeholder="Filtrar por descricao..."
-                value={searchTerm}
-                onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
-                className="pl-10"
-                data-testid="input-search-faturas"
-              />
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {filteredTransactions.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              <CreditCard className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>Nenhuma transacao encontrada</p>
-            </div>
-          ) : (
-            <>
-            <div className="overflow-hidden">
-              <Table className="text-sm table-fixed w-full">
-                <colgroup>
-                  <col style={{ width: "44px" }} />
-                  <col style={{ width: "72px" }} />
-                  <col />
-                  <col style={{ width: "44px" }} />
-                  <col style={{ width: "44px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "55px" }} />
-                  <col style={{ width: "90px" }} />
-                </colgroup>
-                <TableHeader>
-                  <TableRow className="h-9">
-                    <TableHead>Fraude</TableHead>
-                    <SortableHeader column="date">Data</SortableHeader>
-                    <SortableHeader column="description">Descricao</SortableHeader>
-                    <TableHead>Orig.</TableHead>
-                    <TableHead>Tipo</TableHead>
-                    <SortableHeader column="category">Categoria</SortableHeader>
-                    <TableHead>Subcateg.</TableHead>
-                    <SortableHeader column="status">Status</SortableHeader>
-                    <SortableHeader column="amount" className="text-right">Valor</SortableHeader>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {paginatedTransactions.map((t) => (
-                    <TableRow
-                      key={t.id}
-                      className={`h-10 ${t.isFraudSuspect ? "bg-red-50 dark:bg-red-950" : ""}`}
-                      data-testid={`row-fatura-${t.id}`}
-                    >
-                      <TableCell className="py-1.5">
-                        <Checkbox
-                          checked={t.isFraudSuspect || false}
-                          onCheckedChange={(checked) =>
-                            toggleFraudMutation.mutate({ 
-                              id: t.id, 
-                              isFraudSuspect: !!checked,
-                              installmentGroupId: t.installmentGroupId
-                            })
+          <CardHeader className="p-3">
+            <div className="text-sm font-semibold mb-2">Evolucao das Faturas</div>
+            {billMonths.length > 0 ? (
+              (() => {
+                const chartData = billMonths.map(month => {
+                  if (!month) return null;
+                  const billData = billsByMonth[month];
+                  if (!billData) return null;
+                  return {
+                    month: getMonthName(month),
+                    valorRealizado: billData.isPast ? billData.total : undefined,
+                    valorPrevisto: !billData.isPast ? billData.total : undefined,
+                    estornos: billData.estornos > 0 ? billData.estornos : undefined,
+                  };
+                }).filter(Boolean);
+                const lastRealizedIdx = chartData.findIndex(d => d?.valorPrevisto !== undefined) - 1;
+                if (lastRealizedIdx >= 0 && chartData[lastRealizedIdx] && chartData[lastRealizedIdx + 1]) {
+                  chartData[lastRealizedIdx + 1]!.valorPrevisto = chartData[lastRealizedIdx]!.valorRealizado;
+                }
+                return (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <LineChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis dataKey="month" className="text-xs" />
+                      <YAxis tickFormatter={(value) => `R$ ${(value / 1000).toFixed(0)}k`} className="text-xs" />
+                      <RechartsTooltip
+                        formatter={(value: number, name: string) => {
+                          const labels: Record<string, string> = { valorRealizado: 'Fatura Realizada', valorPrevisto: 'Fatura Prevista', estornos: 'Estornos' };
+                          return [formatCurrency(value), labels[name] || name];
+                        }}
+                        contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px' }}
+                      />
+                      <Legend
+                        formatter={(value: string, entry: any) => {
+                          const labels: Record<string, string> = { valorRealizado: 'Realizado', valorPrevisto: 'Previsto', estornos: 'Estornos' };
+                          const label = labels[value] || value;
+                          const isHidden = hiddenLineSeries.has(entry.dataKey);
+                          return <span style={{ color: isHidden ? "hsl(var(--muted-foreground))" : entry.color, textDecoration: isHidden ? "line-through" : "none", cursor: "pointer" }}>{label}</span>;
+                        }}
+                        onClick={(e: any) => {
+                          if (e?.dataKey) {
+                            setHiddenLineSeries(prev => {
+                              const next = new Set(prev);
+                              if (next.has(e.dataKey)) next.delete(e.dataKey); else next.add(e.dataKey);
+                              return next;
+                            });
                           }
-                          data-testid={`checkbox-fraud-${t.id}`}
-                        />
-                      </TableCell>
-                      <TableCell className="py-1.5 text-xs whitespace-nowrap">{formatDate(t.date)}</TableCell>
-                      <TableCell className="py-1.5 overflow-hidden">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <div className="flex items-center gap-1 min-w-0 cursor-default">
-                              <span className="font-medium text-sm truncate">
-                                {t.shortTitle || t.description}
-                              </span>
-                              {t.installmentCurrent && t.installmentTotal && (
-                                <Badge variant="secondary" className="text-xs shrink-0">
-                                  {t.installmentCurrent}/{t.installmentTotal}
-                                </Badge>
-                              )}
-                              {t.isRefund && (
-                                <Badge variant="outline" className="text-xs bg-success/10 text-success shrink-0">
-                                  <RotateCcw className="w-2.5 h-2.5" />
-                                </Badge>
-                              )}
-                              {t.isRecurring && (
-                                <Badge variant="outline" className="text-xs shrink-0">
-                                  <Repeat className="w-2.5 h-2.5" />
-                                </Badge>
-                              )}
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            <p className="max-w-[300px]">{t.originalDescription || t.description}</p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="cursor-default">{getSourceIcon(t.source)}</span>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            <p>{getSourceLabel(t.source)}</p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        <Badge variant={t.type === "receita" ? "default" : "secondary"} className="text-xs">
-                          {t.type === "receita" ? "R" : "D"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        {(() => {
-                          const cat = getCategory(t.categoryId);
-                          return cat ? (
-                            <CategoryIcon iconName={cat.icon} color={cat.color} categoryName={cat.name} />
-                          ) : <span className="text-xs text-muted-foreground">-</span>;
-                        })()}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-xs text-muted-foreground truncate overflow-hidden">
-                        {getSubcategoryName(t.subcategoryId)}
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        <Badge variant={t.status === "realizada" ? "default" : "outline"} className="text-xs">
-                          {t.status === "realizada" ? "Pago" : "Prev"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className={`py-1.5 text-right font-medium text-sm whitespace-nowrap ${t.type === "receita" ? "text-success" : "text-destructive"}`}>
-                        {t.type === "receita" ? "+" : "-"}{formatCurrency(t.amount)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-                <TableFooter>
-                  <TableRow className="h-9 bg-muted/50 font-medium">
-                    <TableCell colSpan={2} className="py-1.5 text-xs">
-                      {filteredTransactions.length} transacao(oes)
-                    </TableCell>
-                    <TableCell colSpan={6} className="py-1.5"></TableCell>
-                    <TableCell className="py-1.5 text-right text-xs whitespace-nowrap">
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-success">+{formatCurrency(filteredTotals.receitas)}</span>
-                        <span className="text-destructive">-{formatCurrency(filteredTotals.despesas)}</span>
-                        <span className={filteredSaldo >= 0 ? "text-success" : "text-destructive"}>={formatCurrency(filteredSaldo)}</span>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                </TableFooter>
-              </Table>
-            </div>
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between mt-4">
-                <span className="text-sm text-muted-foreground">
-                  {filteredTransactions.length} transacao(oes)
-                </span>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    data-testid="button-prev-page"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                  </Button>
-                  <span className="text-sm">
-                    Pagina {currentPage} de {totalPages}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                    disabled={currentPage === totalPages}
-                    data-testid="button-next-page"
-                  >
-                    <ChevronRight className="w-4 h-4" />
-                  </Button>
-                </div>
+                        }}
+                      />
+                      <Line type="monotone" dataKey="valorRealizado" stroke="#10B981" strokeWidth={2} dot={{ fill: '#10B981', strokeWidth: 2, r: 4 }} activeDot={{ r: 6 }} connectNulls hide={hiddenLineSeries.has("valorRealizado")} />
+                      <Line type="monotone" dataKey="valorPrevisto" stroke="#3B82F6" strokeWidth={2} strokeDasharray="5 5" dot={{ fill: '#3B82F6', strokeWidth: 2, r: 4, strokeDasharray: '' }} activeDot={{ r: 6 }} connectNulls hide={hiddenLineSeries.has("valorPrevisto")} />
+                      <Line type="monotone" dataKey="estornos" stroke="#F59E0B" strokeWidth={1} strokeDasharray="3 3" dot={{ fill: '#F59E0B', strokeWidth: 1, r: 3 }} connectNulls legendType="line" hide={hiddenLineSeries.has("estornos")} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                );
+              })()
+            ) : (
+              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                <p>Nenhum dado disponivel</p>
               </div>
             )}
-            </>
-          )}
-        </CardContent>
-      </Card>
+          </CardHeader>
+        </Card>
 
-      {futureInstallmentsList.length > 0 && (
         <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Clock className="w-5 h-5" />
-              Parcelamentos em Andamento
-            </CardTitle>
+          <CardHeader className="pb-3">
+            <div className="flex items-end gap-2 flex-wrap">
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs text-muted-foreground">Buscar</Label>
+                <div className="relative">
+                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 text-muted-foreground w-3 h-3" />
+                  <Input
+                    placeholder="Buscar..."
+                    value={searchTerm}
+                    onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+                    className="pl-7 h-8 text-xs w-[100px]"
+                    data-testid="input-search"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs text-muted-foreground">Tipo</Label>
+                <Select value={filterType} onValueChange={(v) => { setFilterType(v as any); setCurrentPage(1); }}>
+                  <SelectTrigger className="w-[80px] h-8 text-xs" data-testid="filter-type">
+                    <SelectValue placeholder="Tipo" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todos</SelectItem>
+                    <SelectItem value="receita">Receitas</SelectItem>
+                    <SelectItem value="despesa">Despesas</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs text-muted-foreground">Visao</Label>
+                <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v as any); setCurrentPage(1); }}>
+                  <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-status">
+                    <SelectValue placeholder="Visao" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Ambos</SelectItem>
+                    <SelectItem value="realizada">Realizado</SelectItem>
+                    <SelectItem value="prevista">Planejado</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs text-muted-foreground">Categoria</Label>
+                <Select value={filterCategoryId} onValueChange={(v) => { setFilterCategoryId(v); setFilterSubcategoryId("all"); setCurrentPage(1); }}>
+                  <SelectTrigger className="w-[120px] h-8 text-xs" data-testid="filter-category">
+                    <SelectValue placeholder="Todas" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todas</SelectItem>
+                    <SelectItem value="empty">Vazio</SelectItem>
+                    {categories.filter(c => c.active).sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>
+                        {c.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs text-muted-foreground">Subcategoria</Label>
+                <Select value={filterSubcategoryId} onValueChange={(v) => { setFilterSubcategoryId(v); setCurrentPage(1); }}>
+                  <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-subcategory">
+                    <SelectValue placeholder="Todas" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Todas</SelectItem>
+                    <SelectItem value="empty">Vazio</SelectItem>
+                    {subcategories.filter(s => s.active && (filterCategoryId === "all" || filterCategoryId === "empty" || s.categoryId === Number(filterCategoryId))).map((s) => (
+                      <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {(filterType !== "all" || filterStatus !== "all" || filterCategoryId !== "all" || filterSubcategoryId !== "all") && (
+                <Button variant="ghost" size="sm" className="self-end" onClick={() => { setFilterType("all"); setFilterStatus("all"); setFilterCategoryId("all"); setFilterSubcategoryId("all"); setCurrentPage(1); }}>
+                  Limpar
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="overflow-hidden">
-              <Table className="text-sm table-fixed w-full">
-                <colgroup>
-                  <col />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "100px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "80px" }} />
-                </colgroup>
-                <TableHeader>
-                  <TableRow className="h-9">
-                    <TableHead>Descricao</TableHead>
-                    <TableHead>Categoria</TableHead>
-                    <TableHead className="text-center">Progresso</TableHead>
-                    <TableHead className="text-right">Parcela</TableHead>
-                    <TableHead className="text-right">Restante</TableHead>
-                    <TableHead>Proxima</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {futureInstallmentsList.map(([groupId, info]) => (
-                    <TableRow
-                      key={groupId}
-                      className={`h-10 ${info.isFraudSuspect ? "bg-red-50 dark:bg-red-950" : ""}`}
-                    >
-                      <TableCell className="py-1.5 overflow-hidden">
-                        <div className="flex items-center gap-1 min-w-0">
-                          <span className="font-medium text-sm truncate">{info.description}</span>
-                          {info.isFraudSuspect && (
-                            <Badge variant="destructive" className="text-xs shrink-0">
-                              <AlertTriangle className="w-3 h-3 mr-1" />
-                              Fraude
+            {filteredTransactions.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <CreditCard className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                <p>Nenhuma transacao encontrada</p>
+              </div>
+            ) : (
+              <>
+                <div className="overflow-hidden">
+                  <Table className="text-sm table-fixed w-full">
+                    <colgroup>
+                      <col style={{ width: colWidths.dtTrans ? `${colWidths.dtTrans}px` : undefined }} />
+                      <col style={{ width: colWidths.vencFat ? `${colWidths.vencFat}px` : undefined }} />
+                      <col style={colWidths.descricao ? { width: `${colWidths.descricao}px` } : undefined} />
+                      <col style={{ width: colWidths.tipo ? `${colWidths.tipo}px` : undefined }} />
+                      <col style={{ width: colWidths.status ? `${colWidths.status}px` : undefined }} />
+                      <col style={{ width: colWidths.orig ? `${colWidths.orig}px` : undefined }} />
+                      <col style={{ width: colWidths.categoria ? `${colWidths.categoria}px` : undefined }} />
+                      <col style={{ width: colWidths.subcategoria ? `${colWidths.subcategoria}px` : undefined }} />
+                      <col style={{ width: colWidths.valor ? `${colWidths.valor}px` : undefined }} />
+                      <col style={{ width: colWidths.acoes ? `${colWidths.acoes}px` : undefined }} />
+                    </colgroup>
+                    <TableHeader>
+                      <TableRow className="h-9">
+                        <TableHead className="py-1.5 relative">
+                          <SortHeader column="date">Dt.Trans.</SortHeader>
+                          <ResizeHandle col="dtTrans" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          Venc.Fat.
+                          <ResizeHandle col="vencFat" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          <SortHeader column="description">Descricao</SortHeader>
+                          <ResizeHandle col="descricao" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          <SortHeader column="type">Tipo</SortHeader>
+                          <ResizeHandle col="tipo" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          <SortHeader column="status">Visao</SortHeader>
+                          <ResizeHandle col="status" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          Orig.
+                          <ResizeHandle col="orig" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          <SortHeader column="category">Cat.</SortHeader>
+                          <ResizeHandle col="categoria" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          <SortHeader column="subcategory">Subcateg.</SortHeader>
+                          <ResizeHandle col="subcategoria" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 text-right relative">
+                          <SortHeader column="amount">Valor</SortHeader>
+                          <ResizeHandle col="valor" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                        <TableHead className="py-1.5 relative">
+                          Acoes
+                          <ResizeHandle col="acoes" onResizeStart={handleResizeStart} />
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedTransactions.map((t) => (
+                        <TableRow
+                          key={t.id}
+                          className={`h-10 ${t.isFraudSuspect ? "bg-red-50 dark:bg-red-950" : ""}`}
+                          data-testid={`row-fatura-${t.id}`}
+                        >
+                          <TableCell className="py-1.5 text-xs whitespace-nowrap">{t.transactionDate ? formatDate(t.transactionDate) : formatDate(t.date)}</TableCell>
+                          <TableCell className="py-1.5 text-xs whitespace-nowrap">{t.paymentDate ? formatDate(t.paymentDate) : "-"}</TableCell>
+                          <TableCell className="py-1.5 overflow-hidden">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <div className="flex items-center gap-1 min-w-0 cursor-default">
+                                  <span className="font-medium text-sm truncate">
+                                    {t.shortTitle || t.description}
+                                  </span>
+                                  {t.installmentCurrent && t.installmentTotal && (
+                                    <Badge variant="secondary" className="text-xs shrink-0">
+                                      {t.installmentCurrent}/{t.installmentTotal}
+                                    </Badge>
+                                  )}
+                                  {t.isRefund && (
+                                    <Badge variant="outline" className="text-xs bg-success/10 text-success shrink-0">
+                                      <RotateCcw className="w-2.5 h-2.5" />
+                                    </Badge>
+                                  )}
+                                  {t.isRecurring && (
+                                    <Badge variant="outline" className="text-xs shrink-0">
+                                      <Repeat className="w-2.5 h-2.5" />
+                                    </Badge>
+                                  )}
+                                </div>
+                              </TooltipTrigger>
+                              {t.originalDescription && t.originalDescription !== (t.shortTitle || t.description) && (
+                                <TooltipContent>
+                                  <p className="max-w-[300px] text-xs">{t.originalDescription}</p>
+                                </TooltipContent>
+                              )}
+                            </Tooltip>
+                          </TableCell>
+                          <TableCell className="py-1.5">
+                            <Badge variant="outline" className={`text-xs font-bold ${t.type === "receita" ? "border-green-600 text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950" : "border-red-600 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950"}`}>
+                              {t.type === "receita" ? "R" : "D"}
                             </Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        {(() => {
-                          const cat = getCategory(info.categoryId);
-                          return cat ? (
-                            <CategoryIcon iconName={cat.icon} color={cat.color} categoryName={cat.name} />
-                          ) : <span className="text-xs text-muted-foreground">-</span>;
-                        })()}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-center">
-                        <Badge variant="outline" className="text-xs">
-                          {info.parcelasPagas}/{info.totalParcelas} pagas
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="py-1.5 text-right font-medium text-sm">
-                        {formatCurrency(info.valorParcela)}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-right font-medium text-sm text-blue-600 dark:text-blue-400">
-                        {formatCurrency(info.valorRestante)}
-                      </TableCell>
-                      <TableCell className="py-1.5 text-xs">
-                        {info.proximaFatura ? getMonthName(info.proximaFatura) : "-"}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-                <TableFooter>
-                  <TableRow className="h-9 bg-muted/50 font-medium">
-                    <TableCell colSpan={2} className="py-1.5 text-xs">
-                      {futureInstallmentsList.length} parcelamento(s)
-                    </TableCell>
-                    <TableCell className="py-1.5"></TableCell>
-                    <TableCell className="py-1.5 text-right text-xs text-destructive whitespace-nowrap">
-                      {formatCurrency(futureInstallmentsList.reduce((sum, [, info]) => sum + info.valorParcela, 0))}
-                    </TableCell>
-                    <TableCell className="py-1.5 text-right text-xs text-blue-600 dark:text-blue-400 whitespace-nowrap">
-                      {formatCurrency(futureInstallmentsList.reduce((sum, [, info]) => sum + info.valorRestante, 0))}
-                    </TableCell>
-                    <TableCell className="py-1.5"></TableCell>
-                  </TableRow>
-                </TableFooter>
-              </Table>
-            </div>
+                          </TableCell>
+                          <TableCell className="py-1.5">
+                            <Badge variant="outline" className={`text-xs font-bold ${t.status === "realizada" ? "border-emerald-700 text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950" : "border-blue-700 text-blue-800 dark:text-blue-300 bg-blue-50 dark:bg-blue-950"}`}>
+                              {t.status === "realizada" ? "Real" : "Plan"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="py-1.5">
+                            {getSourceBadge(t.source)}
+                          </TableCell>
+                          <TableCell className="py-1.5 overflow-hidden">
+                            {(() => {
+                              const cat = getCategory(t.categoryId);
+                              return cat ? (
+                                <CategoryIcon iconName={cat.icon} color={cat.color} categoryName={cat.name} />
+                              ) : <span className="text-xs text-muted-foreground">-</span>;
+                            })()}
+                          </TableCell>
+                          <TableCell className="py-1.5 text-xs text-muted-foreground truncate overflow-hidden">
+                            {getSubcategoryName(t.subcategoryId)}
+                          </TableCell>
+                          <TableCell className={`py-1.5 text-right font-medium text-sm whitespace-nowrap ${t.type === "receita" ? "text-success" : "text-destructive"}`}>
+                            {t.type === "receita" ? "+" : "-"}{formatCurrency(t.amount)}
+                          </TableCell>
+                          <TableCell className="py-1.5">
+                            <div className="flex items-center gap-0.5">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <div>
+                                    <Checkbox
+                                      checked={t.isFraudSuspect || false}
+                                      onCheckedChange={(checked) =>
+                                        toggleFraudMutation.mutate({
+                                          id: t.id,
+                                          isFraudSuspect: !!checked,
+                                          installmentGroupId: t.installmentGroupId
+                                        })
+                                      }
+                                      data-testid={`checkbox-fraud-${t.id}`}
+                                    />
+                                  </div>
+                                </TooltipTrigger>
+                                <TooltipContent>Marcar como fraude</TooltipContent>
+                              </Tooltip>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => deleteMutation.mutate(t.id)}
+                                data-testid={`button-delete-${t.id}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                    <TableFooter>
+                      <TableRow className="h-9 bg-muted/50 font-medium">
+                        <TableCell colSpan={3} className="py-1.5 text-xs">
+                          {filteredTransactions.length} transacao(oes)
+                        </TableCell>
+                        <TableCell colSpan={6} className="py-1.5"></TableCell>
+                        <TableCell className="py-1.5 text-right text-xs whitespace-nowrap">
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-success">+{formatCurrency(filteredTotals.receitas)}</span>
+                            <span className="text-destructive">-{formatCurrency(filteredTotals.despesas)}</span>
+                            <span className={filteredSaldo >= 0 ? "text-success" : "text-destructive"}>={formatCurrency(filteredSaldo)}</span>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    </TableFooter>
+                  </Table>
+                </div>
+
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between mt-4 pt-4 border-t">
+                    <p className="text-sm text-muted-foreground">
+                      Mostrando {((currentPage - 1) * itemsPerPage) + 1} a {Math.min(currentPage * itemsPerPage, filteredTransactions.length)} de {filteredTransactions.length} registros
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                        disabled={currentPage === 1}
+                        data-testid="button-prev-page"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </Button>
+                      <span className="text-sm">
+                        Pagina {currentPage} de {totalPages}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                        disabled={currentPage === totalPages}
+                        data-testid="button-next-page"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </CardContent>
         </Card>
-      )}
+
+        {futureInstallmentsList.length > 0 && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Clock className="w-4 h-4" />
+                Parcelamentos em Andamento
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-hidden">
+                <Table className="text-sm table-fixed w-full">
+                  <colgroup>
+                    <col />
+                    <col style={{ width: "90px" }} />
+                    <col style={{ width: "100px" }} />
+                    <col style={{ width: "90px" }} />
+                    <col style={{ width: "90px" }} />
+                    <col style={{ width: "80px" }} />
+                  </colgroup>
+                  <TableHeader>
+                    <TableRow className="h-9">
+                      <TableHead>Descricao</TableHead>
+                      <TableHead>Categoria</TableHead>
+                      <TableHead className="text-center">Progresso</TableHead>
+                      <TableHead className="text-right">Parcela</TableHead>
+                      <TableHead className="text-right">Restante</TableHead>
+                      <TableHead>Proxima</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {futureInstallmentsList.map(([groupId, info]) => (
+                      <TableRow
+                        key={groupId}
+                        className={`h-10 ${info.isFraudSuspect ? "bg-red-50 dark:bg-red-950" : ""}`}
+                      >
+                        <TableCell className="py-1.5 overflow-hidden">
+                          <div className="flex items-center gap-1 min-w-0">
+                            <span className="font-medium text-sm truncate">{info.description}</span>
+                            {info.isFraudSuspect && (
+                              <Badge variant="destructive" className="text-xs shrink-0">
+                                <AlertTriangle className="w-3 h-3 mr-1" />
+                                Fraude
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          {(() => {
+                            const cat = getCategory(info.categoryId);
+                            return cat ? (
+                              <CategoryIcon iconName={cat.icon} color={cat.color} categoryName={cat.name} />
+                            ) : <span className="text-xs text-muted-foreground">-</span>;
+                          })()}
+                        </TableCell>
+                        <TableCell className="py-1.5 text-center">
+                          <Badge variant="outline" className="text-xs">
+                            {info.parcelasPagas}/{info.totalParcelas} pagas
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="py-1.5 text-right font-medium text-sm">
+                          {formatCurrency(info.valorParcela)}
+                        </TableCell>
+                        <TableCell className="py-1.5 text-right font-medium text-sm text-blue-600 dark:text-blue-400">
+                          {formatCurrency(info.valorRestante)}
+                        </TableCell>
+                        <TableCell className="py-1.5 text-xs">
+                          {info.proximaFatura ? getMonthName(info.proximaFatura) : "-"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                  <TableFooter>
+                    <TableRow className="h-9 bg-muted/50 font-medium">
+                      <TableCell colSpan={2} className="py-1.5 text-xs">
+                        {futureInstallmentsList.length} parcelamento(s)
+                      </TableCell>
+                      <TableCell className="py-1.5"></TableCell>
+                      <TableCell className="py-1.5 text-right text-xs text-destructive whitespace-nowrap">
+                        {formatCurrency(futureInstallmentsList.reduce((sum, [, info]) => sum + info.valorParcela, 0))}
+                      </TableCell>
+                      <TableCell className="py-1.5 text-right text-xs text-blue-600 dark:text-blue-400 whitespace-nowrap">
+                        {formatCurrency(futureInstallmentsList.reduce((sum, [, info]) => sum + info.valorRestante, 0))}
+                      </TableCell>
+                      <TableCell className="py-1.5"></TableCell>
+                    </TableRow>
+                  </TableFooter>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

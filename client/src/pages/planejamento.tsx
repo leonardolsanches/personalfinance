@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef } from "react";
+import { useState, useMemo, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -41,6 +41,10 @@ import {
   Repeat,
   ChevronLeft,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  ChevronUp,
+  ChevronDown,
   Trash2,
   Edit2,
   TrendingUp,
@@ -51,13 +55,27 @@ import {
   X,
   Search,
   ArrowUpDown,
-  GripVertical,
+  Pencil,
+  PenLine,
+  Upload,
+  AlertTriangle,
+  Building2,
 } from "lucide-react";
 import { CategoryIcon } from "@/components/category-icon";
 import { exportToExcel } from "@/lib/exportExcel";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, LabelList, BarChart, Bar } from "recharts";
-import type { BudgetItem, Category, Subcategory, Beneficiary, InsertCategory, InsertSubcategory } from "@shared/schema";
+import type { BudgetItem, Transaction, Category, Subcategory, Beneficiary, InsertCategory, InsertSubcategory } from "@shared/schema";
 import { PageHeader } from "@/components/page-header";
+import { filterCardBillPayments } from "@/lib/utils";
+import { useColumnWidths } from "@/hooks/use-column-widths";
+import { ResizeHandle } from "@/components/resize-handle";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+
+function formatDate(date: string | null) {
+  if (!date) return "-";
+  const [year, month, day] = date.split("-");
+  return `${day}/${month}/${year.slice(2)}`;
+}
 
 function formatCurrency(value: number | string) {
   const numValue = typeof value === "string" ? parseFloat(value) : value;
@@ -79,6 +97,15 @@ function getFullMonthName(yearMonth: string) {
   return `${monthNames[parseInt(month) - 1]} ${year}`;
 }
 
+function calcBillDueDate(yearMonth: string): string {
+  const [y, m] = yearMonth.split("-").map(Number);
+  const d = new Date(y, m - 1, 9);
+  const dow = d.getDay();
+  if (dow === 0) d.setDate(10);
+  if (dow === 6) d.setDate(11);
+  return d.toISOString().split("T")[0];
+}
+
 function generateMonths(startYear: number, startMonth: number, count: number): string[] {
   const months: string[] = [];
   let year = startYear;
@@ -94,6 +121,60 @@ function generateMonths(startYear: number, startMonth: number, count: number): s
   return months;
 }
 
+function formatBRLInput(value: string): string {
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return "";
+  const cents = parseInt(digits, 10);
+  const reais = (cents / 100).toFixed(2);
+  const [intPart, decPart] = reais.split(".");
+  const formatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${formatted},${decPart}`;
+}
+
+function parseBRLInput(formatted: string): string {
+  if (!formatted) return "";
+  const clean = formatted.replace(/\./g, "").replace(",", ".");
+  const num = parseFloat(clean);
+  return isNaN(num) ? "" : num.toFixed(2);
+}
+
+function formatDateBR(isoDate: string): string {
+  if (!isoDate) return "";
+  const [y, m, d] = isoDate.split("-");
+  if (!y || !m || !d) return isoDate;
+  return `${d}/${m}/${y}`;
+}
+
+function parseDateBR(brDate: string): string {
+  if (!brDate) return "";
+  const clean = brDate.replace(/[^0-9/]/g, "");
+  const parts = clean.split("/");
+  if (parts.length === 3) {
+    const [d, m, y] = parts;
+    if (d && m && y && y.length === 4) return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  return "";
+}
+
+function formatDateInputBR(value: string, prevValue: string): string {
+  let val = value.replace(/[^0-9/]/g, "");
+  const digits = val.replace(/\//g, "");
+  if (digits.length <= 2) {
+    if (digits.length === 2 && !val.includes("/") && !prevValue.endsWith("/")) {
+      val = digits + "/";
+    }
+  } else if (digits.length <= 4) {
+    val = digits.slice(0, 2) + "/" + digits.slice(2);
+    if (digits.length === 4 && val.split("/").length === 2 && !prevValue.endsWith("/")) {
+      val = val + "/";
+    }
+  } else {
+    val = digits.slice(0, 2) + "/" + digits.slice(2, 4) + "/" + digits.slice(4, 8);
+  }
+  if (val.length > 10) val = val.slice(0, 10);
+  return val;
+}
+
 interface BudgetItemFormData {
   description: string;
   shortTitle: string;
@@ -102,10 +183,15 @@ interface BudgetItemFormData {
   subcategoryId: number | null;
   beneficiaryId: number | null;
   amount: string;
+  amountDisplay: string;
   transactionDate: string;
   billDueDate: string;
+  transactionDateDisplay: string;
+  billDueDateDisplay: string;
   isRecurring: boolean;
   repeatMonths: number;
+  repeatMode: "none" | "count" | "until";
+  repeatUntil: string;
   divideMonths: number;
   notes: string;
 }
@@ -123,10 +209,15 @@ const defaultFormData: BudgetItemFormData = {
   subcategoryId: null,
   beneficiaryId: null,
   amount: "",
+  amountDisplay: "",
   transactionDate: getTodayString(),
   billDueDate: getTodayString(),
+  transactionDateDisplay: formatDateBR(getTodayString()),
+  billDueDateDisplay: formatDateBR(getTodayString()),
   isRecurring: false,
-  repeatMonths: 1,
+  repeatMonths: 12,
+  repeatMode: "count",
+  repeatUntil: "",
   divideMonths: 1,
   notes: "",
 };
@@ -157,10 +248,13 @@ export default function Planejamento() {
   const currentQuarter = getQuarterFromMonth(now.getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [selectedQuarter, setSelectedQuarter] = useState(currentQuarter);
+  const [viewMode, setViewMode] = useState<"quarter" | "year" | "all">("quarter");
+  const monthsScrollRef = useRef<HTMLDivElement>(null);
   const currentYearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const [selectedMonth, setSelectedMonth] = useState<string | null>(currentYearMonth);
   const handleMonthChange = (month: string | null) => {
     setSelectedMonth(month);
+    setCurrentPage(1);
     if (month) {
       const [y, m] = month.split("-").map(Number);
       setSelectedYear(y);
@@ -170,57 +264,46 @@ export default function Planejamento() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [formData, setFormData] = useState<BudgetItemFormData>(defaultFormData);
   const [editingItem, setEditingItem] = useState<BudgetItem | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [filterType, setFilterType] = useState<"all" | "receita" | "despesa">("all");
+  const [filterStatus, setFilterStatus] = useState<"all" | "prevista" | "realizada">("all");
+  const [filterSource, setFilterSource] = useState<string>("all");
   const [filterCategoryId, setFilterCategoryId] = useState<string>("all");
   const [filterSubcategoryId, setFilterSubcategoryId] = useState<string>("all");
-  const [filterBeneficiaryId, setFilterBeneficiaryId] = useState<string>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [showAutocompleteSuggestions, setShowAutocompleteSuggestions] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkShortTitle, setBulkShortTitle] = useState("");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
+  type PlanSortColumn = "transactionDate" | "billDueDate" | "yearMonth" | "shortTitle" | "categoryId" | "subcategoryId" | "beneficiaryId" | "type" | "source" | "amount";
+  type PlanSortDirection = "asc" | "desc";
+  const [sortColumn, setSortColumn] = useState<PlanSortColumn>("yearMonth");
+  const [sortDirection, setSortDirection] = useState<PlanSortDirection>("asc");
+  const handleSort = (column: PlanSortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortColumn(column);
+      setSortDirection("asc");
+    }
+  };
+  const SortIcon = ({ column }: { column: PlanSortColumn }) => {
+    if (sortColumn !== column) return <ArrowUpDown className="w-3 h-3 ml-1" />;
+    return sortDirection === "asc" ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />;
+  };
+  const [hiddenChartCategories, setHiddenChartCategories] = useState<Set<string>>(new Set());
+  const [hiddenBarSeries, setHiddenBarSeries] = useState<Set<string>>(new Set());
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
   const [subcategoryDialogOpen, setSubcategoryDialogOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [newCategoryColor, setNewCategoryColor] = useState("#3b82f6");
   const [newSubcategoryName, setNewSubcategoryName] = useState("");
 
-  const defaultColWidths = { mes: 60, descricao: 0, categoria: 36, subcategoria: 80, beneficiario: 80, tipo: 40, info: 50, valor: 85, acoes: 60 };
-  const [colWidths, setColWidths] = useState(defaultColWidths);
-  const resizingCol = useRef<{ col: string; startX: number; startW: number } | null>(null);
-
-  const handleResizeStart = useCallback((col: string, e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = colWidths[col as keyof typeof colWidths] || 80;
-    resizingCol.current = { col, startX, startW };
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!resizingCol.current) return;
-      const delta = ev.clientX - resizingCol.current.startX;
-      const newW = Math.max(30, resizingCol.current.startW + delta);
-      setColWidths(prev => ({ ...prev, [resizingCol.current!.col]: newW }));
-    };
-    const onMouseUp = () => {
-      resizingCol.current = null;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [colWidths]);
-
-  const ResizeHandle = useCallback(({ col }: { col: string }) => (
-    <span
-      className="absolute right-0 top-0 bottom-0 w-[5px] cursor-col-resize z-10 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
-      onMouseDown={(e) => handleResizeStart(col, e)}
-      data-testid={`resize-${col}`}
-    >
-      <GripVertical className="w-2.5 h-2.5 text-muted-foreground/50" />
-    </span>
-  ), [handleResizeStart]);
+  const defaultColWidths = { checkbox: 36, dtTrans: 72, vencFat: 72, descricao: 0, tipo: 44, status: 55, orig: 44, categoria: 90, subcategoria: 90, valor: 90, acoes: 60 };
+  const { colWidths, handleResizeStart } = useColumnWidths("planejamento", defaultColWidths);
 
   const toggleCategory = (key: string) => {
     setExpandedCategories(prev => {
@@ -234,14 +317,116 @@ export default function Planejamento() {
     });
   };
 
-  const months = useMemo(() => {
-    const startMonth = getQuarterStartMonth(selectedQuarter);
-    return generateMonths(selectedYear, startMonth, 3);
-  }, [selectedYear, selectedQuarter]);
-
   const { data: budgetItems = [], isLoading } = useQuery<BudgetItem[]>({
     queryKey: ["/api/budget-items"],
   });
+
+  const { data: allTransactions = [] } = useQuery<Transaction[]>({
+    queryKey: ["/api/transactions"],
+    enabled: filterStatus === "realizada" || filterStatus === "all",
+  });
+
+  const visibleTransactions = useMemo(() => filterCardBillPayments(allTransactions), [allTransactions]);
+
+  function getTxCompetenciaMonth(t: Transaction): string {
+    if (t.paymentDate) {
+      const d = new Date(t.paymentDate);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    }
+    if (t.source === "cartao" && t.cardBillMonth) return t.cardBillMonth;
+    const dateStr = t.transactionDate || t.date;
+    const d = new Date(dateStr);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  const filteredTransactions = useMemo(() => {
+    if (filterStatus === "prevista") return [];
+    return visibleTransactions.filter((t) => {
+      if (filterType !== "all" && t.type !== filterType) return false;
+      if (filterSource !== "all") {
+        if (filterSource === "parcelamento") {
+          if (!(t.installmentTotal && t.installmentTotal > 1)) return false;
+        } else if (filterSource === "import") {
+          if (t.source === "manual") return false;
+        } else if (filterSource === "manual") {
+          if (t.source !== "manual") return false;
+        }
+      }
+      if (filterCategoryId !== "all") {
+        if (filterCategoryId === "empty") { if (t.categoryId) return false; }
+        else if (t.categoryId !== Number(filterCategoryId)) return false;
+      }
+      if (filterSubcategoryId !== "all") {
+        if (filterSubcategoryId === "empty") { if (t.subcategoryId) return false; }
+        else if (t.subcategoryId !== Number(filterSubcategoryId)) return false;
+      }
+      if (searchTerm) {
+        const term = searchTerm.toLowerCase();
+        const matchDesc = t.description?.toLowerCase().includes(term);
+        const matchShort = t.shortTitle?.toLowerCase().includes(term);
+        if (!matchDesc && !matchShort) return false;
+      }
+      return true;
+    });
+  }, [visibleTransactions, filterType, filterSource, filterCategoryId, filterSubcategoryId, searchTerm, filterStatus]);
+
+  const filteredBudgetItems = useMemo(() => {
+    if (filterStatus === "realizada") return [];
+    return budgetItems.filter((item) => {
+      if (filterType !== "all" && item.type !== filterType) return false;
+      if (filterSource !== "all") {
+        if (filterSource === "parcelamento") {
+          if (!item.isFromInstallment) return false;
+        } else if (filterSource === "import") {
+          if (item.source !== "import" || item.isFromInstallment) return false;
+        } else if (filterSource === "manual") {
+          if (item.source !== "manual" || item.isFromInstallment) return false;
+        }
+      }
+      if (filterCategoryId !== "all") {
+        if (filterCategoryId === "empty") { if (item.categoryId) return false; }
+        else if (item.categoryId !== Number(filterCategoryId)) return false;
+      }
+      if (filterSubcategoryId !== "all") {
+        if (filterSubcategoryId === "empty") { if (item.subcategoryId) return false; }
+        else if (item.subcategoryId !== Number(filterSubcategoryId)) return false;
+      }
+      if (searchTerm) {
+        const term = searchTerm.toLowerCase();
+        const matchDesc = item.description?.toLowerCase().includes(term);
+        const matchShort = item.shortTitle?.toLowerCase().includes(term);
+        if (!matchDesc && !matchShort) return false;
+      }
+      return true;
+    });
+  }, [budgetItems, filterType, filterSource, filterCategoryId, filterSubcategoryId, searchTerm, filterStatus]);
+
+  const months = useMemo(() => {
+    if (viewMode === "year") {
+      return generateMonths(selectedYear, 1, 12);
+    }
+    if (viewMode === "all") {
+      const allMonths = new Set<string>();
+      for (const item of filteredBudgetItems) {
+        allMonths.add(item.yearMonth);
+      }
+      for (const t of filteredTransactions) {
+        allMonths.add(getTxCompetenciaMonth(t));
+      }
+      const sorted = Array.from(allMonths).sort();
+      if (sorted.length === 0) {
+        return generateMonths(selectedYear, 1, 12);
+      }
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      const [fy, fm] = first.split("-").map(Number);
+      const [ly, lm] = last.split("-").map(Number);
+      const count = (ly - fy) * 12 + (lm - fm) + 1;
+      return generateMonths(fy, fm, count);
+    }
+    const startMonth = getQuarterStartMonth(selectedQuarter);
+    return generateMonths(selectedYear, startMonth, 3);
+  }, [selectedYear, selectedQuarter, viewMode, filteredBudgetItems, filteredTransactions]);
 
   const { data: categories = [] } = useQuery<Category[]>({
     queryKey: ["/api/categories"],
@@ -300,12 +485,17 @@ export default function Planejamento() {
       const res = await apiRequest("PATCH", `/api/budget-items/${id}`, data);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       setDialogOpen(false);
       setEditingItem(null);
       setFormData(defaultFormData);
       queryClient.invalidateQueries({ queryKey: ["/api/budget-items"] });
-      toast({ title: "Item atualizado" });
+      const syncedCount = data?.syncedCount || 0;
+      if (syncedCount > 0) {
+        toast({ title: `Item atualizado e ${syncedCount} mes(es) futuro(s) sincronizado(s)` });
+      } else {
+        toast({ title: "Item atualizado" });
+      }
     },
     onError: () => {
       toast({ title: "Erro ao atualizar", variant: "destructive" });
@@ -323,6 +513,36 @@ export default function Planejamento() {
     },
     onError: () => {
       toast({ title: "Erro ao remover", variant: "destructive" });
+    },
+  });
+
+  const batchDeleteMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      return apiRequest("POST", "/api/budget-items/delete-batch", { ids });
+    },
+    onSuccess: (_data, ids) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/budget-items"] });
+      toast({ title: `${ids.length} itens excluidos` });
+      setSelectedIds(new Set());
+      setShowDeleteConfirm(false);
+    },
+    onError: () => {
+      toast({ title: "Erro ao excluir itens", variant: "destructive" });
+    },
+  });
+
+  const updateShortTitleBatchMutation = useMutation({
+    mutationFn: async ({ ids, shortTitle }: { ids: number[]; shortTitle: string }) => {
+      return apiRequest("POST", "/api/budget-items/update-short-title-batch", { ids, shortTitle });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/budget-items"] });
+      toast({ title: "Titulo breve atualizado com sucesso!" });
+      setSelectedIds(new Set());
+      setBulkShortTitle("");
+    },
+    onError: () => {
+      toast({ title: "Erro ao atualizar titulo breve", variant: "destructive" });
     },
   });
 
@@ -373,6 +593,7 @@ export default function Planejamento() {
     }
     setSelectedQuarter(newQuarter);
     setSelectedYear(newYear);
+    setViewMode("quarter");
   };
 
   // Group items by category for a given month
@@ -398,22 +619,29 @@ export default function Planejamento() {
     });
   };
 
-  const getExpensesByCategory = (items: BudgetItem[]) => {
-    const expenseItems = items.filter(item => item.type === "despesa");
+  const getExpensesByCategory = (budgetList: BudgetItem[], txList?: Transaction[]) => {
     const groups = new Map<number | null, { name: string; value: number; color: string }>();
-    
-    for (const item of expenseItems) {
-      const catId = item.categoryId;
+
+    const addToGroup = (catId: number | null, amount: number) => {
       if (!groups.has(catId)) {
         const category = categories.find(c => c.id === catId);
-        groups.set(catId, { 
-          name: category?.name || "Sem categoria", 
-          value: 0, 
-          color: category?.color || "#888888" 
+        groups.set(catId, {
+          name: category?.name || "Sem categoria",
+          value: 0,
+          color: category?.color || "#888888"
         });
       }
-      const group = groups.get(catId)!;
-      group.value += parseFloat(item.amount?.toString() || "0");
+      groups.get(catId)!.value += amount;
+    };
+
+    for (const item of budgetList.filter(i => i.type === "despesa")) {
+      addToGroup(item.categoryId, parseFloat(item.amount?.toString() || "0"));
+    }
+
+    if (txList) {
+      for (const t of txList.filter(tx => tx.type === "despesa")) {
+        addToGroup(t.categoryId, Math.abs(parseFloat(String(t.amount))));
+      }
     }
     
     return Array.from(groups.values())
@@ -432,6 +660,8 @@ export default function Planejamento() {
       ...defaultFormData,
       transactionDate: getTodayString(),
       billDueDate: getTodayString(),
+      transactionDateDisplay: formatDateBR(getTodayString()),
+      billDueDateDisplay: formatDateBR(getTodayString()),
     });
     setDialogOpen(true);
   };
@@ -439,6 +669,8 @@ export default function Planejamento() {
   const handleEditItem = (item: BudgetItem) => {
     setEditingItem(item);
     setSelectedMonth(item.yearMonth);
+    const amtNum = parseFloat(item.amount?.toString() || "0");
+    const amtDisplay = amtNum ? formatBRLInput(Math.round(amtNum * 100).toString()) : "";
     setFormData({
       description: item.description,
       shortTitle: item.shortTitle || "",
@@ -447,10 +679,15 @@ export default function Planejamento() {
       subcategoryId: item.subcategoryId,
       beneficiaryId: item.beneficiaryId,
       amount: item.amount,
+      amountDisplay: amtDisplay,
       transactionDate: item.transactionDate || "",
+      transactionDateDisplay: formatDateBR(item.transactionDate || ""),
       billDueDate: item.billDueDate || "",
-      isRecurring: item.isRecurring || false,
-      repeatMonths: 1,
+      billDueDateDisplay: formatDateBR(item.billDueDate || ""),
+      isRecurring: false,
+      repeatMonths: 0,
+      repeatMode: "count",
+      repeatUntil: "",
       divideMonths: 1,
       notes: item.notes || "",
     });
@@ -464,38 +701,123 @@ export default function Planejamento() {
     }
 
     if (editingItem) {
-      updateMutation.mutate({
-        id: editingItem.id,
-        data: {
-          description: formData.description,
-          shortTitle: formData.shortTitle || null,
-          type: formData.type,
-          categoryId: formData.categoryId,
-          subcategoryId: formData.subcategoryId,
-          beneficiaryId: formData.beneficiaryId,
-          amount: formData.amount,
-          transactionDate: formData.transactionDate || null,
-          billDueDate: formData.billDueDate || null,
-          isRecurring: formData.isRecurring,
-          notes: formData.notes,
-        },
-      });
+      const updateData: any = {
+        description: formData.isRecurring ? `${formData.shortTitle || formData.description} #RECORRENCIA 001` : formData.description,
+        shortTitle: formData.shortTitle || null,
+        type: formData.type,
+        categoryId: formData.categoryId,
+        subcategoryId: formData.subcategoryId,
+        beneficiaryId: formData.beneficiaryId,
+        amount: formData.amount,
+        transactionDate: formData.transactionDate || null,
+        billDueDate: formData.billDueDate || null,
+        isRecurring: formData.isRecurring,
+        notes: formData.notes,
+      };
+
+      if (editingItem.isRecurring && editingItem.recurringGroupId) {
+        updateData.syncFutureMonths = true;
+      }
+      
+      const effectiveRepeatMonths = (formData.isRecurring && (formData.repeatMode === "none" || formData.repeatMonths === 0)) ? 60 : formData.repeatMonths;
+      if (formData.isRecurring && effectiveRepeatMonths > 0) {
+        const recurringGroupId = editingItem.recurringGroupId || `BREC-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        if (!editingItem.recurringGroupId) {
+          updateData.recurringGroupId = recurringGroupId;
+        }
+        const additionalItems: any[] = [];
+        let [year, month] = editingItem.yearMonth.split("-").map(Number);
+        month++;
+        if (month > 12) { month = 1; year++; }
+        for (let i = 0; i < effectiveRepeatMonths; i++) {
+          const yearMonth = `${year}-${String(month).padStart(2, "0")}`;
+          additionalItems.push({
+            description: `${formData.shortTitle || formData.description} #RECORRENCIA ${String(i + 2).padStart(3, "0")}`,
+            shortTitle: formData.shortTitle || null,
+            type: formData.type,
+            categoryId: formData.categoryId,
+            subcategoryId: formData.subcategoryId,
+            beneficiaryId: formData.beneficiaryId,
+            yearMonth,
+            amount: formData.amount,
+            transactionDate: formData.transactionDate || null,
+            billDueDate: calcBillDueDate(yearMonth),
+            isRecurring: true,
+            recurringGroupId,
+            notes: formData.notes,
+          });
+          month++;
+          if (month > 12) { month = 1; year++; }
+        }
+        setIsSaving(true);
+        apiRequest("PATCH", `/api/budget-items/${editingItem.id}`, updateData)
+          .then(() => apiRequest("POST", "/api/budget-items/batch", { items: additionalItems }))
+          .then(() => {
+            setDialogOpen(false);
+            setEditingItem(null);
+            setFormData(defaultFormData);
+            queryClient.invalidateQueries({ queryKey: ["/api/budget-items"] });
+            toast({ title: `Item atualizado e ${additionalItems.length} copia(s) criada(s)` });
+          })
+          .catch(() => {
+            queryClient.invalidateQueries({ queryKey: ["/api/budget-items"] });
+            toast({ title: "Erro ao salvar", variant: "destructive" });
+          })
+          .finally(() => setIsSaving(false));
+      } else {
+        updateMutation.mutate({ id: editingItem.id, data: updateData });
+      }
     } else {
       const items: any[] = [];
       const baseAmount = parseFloat(formData.amount);
-      const repeatCount = formData.isRecurring && formData.repeatMonths === 0 ? 60 : formData.repeatMonths;
+      let repeatCount = formData.repeatMonths;
+      if (formData.isRecurring) {
+        if (formData.repeatMode === "until" && formData.repeatUntil) {
+          const parts = formData.repeatUntil.split("/");
+          if (parts.length === 2) {
+            const untilMonth = parseInt(parts[0]);
+            const untilYear = parseInt(parts[1]);
+            if (isNaN(untilMonth) || isNaN(untilYear) || untilMonth < 1 || untilMonth > 12 || untilYear < 2020) {
+              toast({ title: "Data 'Repetir ate' invalida. Use formato MM/AAAA", variant: "destructive" });
+              return;
+            }
+            const [startY, startM] = selectedMonth.split("-").map(Number);
+            repeatCount = (untilYear - startY) * 12 + (untilMonth - startM) + 1;
+            if (repeatCount < 1) {
+              toast({ title: "Data 'Repetir ate' deve ser posterior ao mes selecionado", variant: "destructive" });
+              return;
+            }
+          } else {
+            toast({ title: "Preencha a data 'Repetir ate' no formato MM/AAAA", variant: "destructive" });
+            return;
+          }
+        } else if (formData.repeatMode === "none" || formData.repeatMonths === 0) {
+          repeatCount = 60;
+        }
+      }
       const monthsToCreate = formData.isRecurring
         ? repeatCount
         : formData.divideMonths > 1
           ? formData.divideMonths
           : 1;
       const amountPerMonth = formData.divideMonths > 1 ? baseAmount / formData.divideMonths : baseAmount;
+      const recurringGroupId = formData.isRecurring ? `BREC-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` : null;
 
       let [year, month] = selectedMonth.split("-").map(Number);
+      const baseTxDate = formData.transactionDate || getTodayString();
       for (let i = 0; i < monthsToCreate; i++) {
         const yearMonth = `${year}-${String(month).padStart(2, "0")}`;
+        const itemBillDueDate = (formData.isRecurring || formData.divideMonths > 1)
+          ? calcBillDueDate(yearMonth)
+          : (formData.billDueDate || null);
+        let itemTxDate = baseTxDate;
+        if ((formData.isRecurring || formData.divideMonths > 1) && i > 0) {
+          const [txY, txM, txD] = baseTxDate.split("-").map(Number);
+          const newDate = new Date(txY, txM - 1 + i, txD);
+          itemTxDate = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, "0")}-${String(newDate.getDate()).padStart(2, "0")}`;
+        }
         items.push({
-          description: formData.description,
+          description: monthsToCreate > 1 ? `${formData.shortTitle || formData.description} #RECORRENCIA ${String(i + 1).padStart(3, "0")}` : formData.description,
           shortTitle: formData.shortTitle || null,
           type: formData.type,
           categoryId: formData.categoryId,
@@ -503,9 +825,10 @@ export default function Planejamento() {
           beneficiaryId: formData.beneficiaryId,
           yearMonth,
           amount: amountPerMonth.toFixed(2),
-          transactionDate: formData.transactionDate || null,
-          billDueDate: formData.billDueDate || null,
+          transactionDate: itemTxDate,
+          billDueDate: itemBillDueDate,
           isRecurring: formData.isRecurring,
+          recurringGroupId,
           notes: formData.notes,
           installmentCurrent: formData.divideMonths > 1 ? i + 1 : null,
           installmentTotal: formData.divideMonths > 1 ? formData.divideMonths : null,
@@ -525,55 +848,44 @@ export default function Planejamento() {
       ...prev,
       description: suggestion.description,
       amount: Math.abs(suggestion.amount).toFixed(2),
+      amountDisplay: formatBRLInput(Math.round(Math.abs(suggestion.amount) * 100).toString()),
     }));
   };
 
   const applyAutocompleteSuggestion = (suggestion: AutocompleteSuggestion) => {
+    const sugAmt = parseFloat(suggestion.amount || "0");
     setFormData((prev) => ({
       ...prev,
       shortTitle: suggestion.shortTitle,
       description: suggestion.shortTitle,
       amount: suggestion.amount,
+      amountDisplay: sugAmt ? formatBRLInput(Math.round(Math.abs(sugAmt) * 100).toString()) : "",
       categoryId: suggestion.categoryId,
       subcategoryId: suggestion.subcategoryId,
     }));
     setShowAutocompleteSuggestions(false);
   };
 
-  const filteredBudgetItems = useMemo(() => {
-    return budgetItems.filter((item) => {
-      if (filterType !== "all" && item.type !== filterType) return false;
-      if (filterCategoryId !== "all") {
-        if (filterCategoryId === "empty") { if (item.categoryId) return false; }
-        else if (item.categoryId !== Number(filterCategoryId)) return false;
-      }
-      if (filterSubcategoryId !== "all") {
-        if (filterSubcategoryId === "empty") { if (item.subcategoryId) return false; }
-        else if (item.subcategoryId !== Number(filterSubcategoryId)) return false;
-      }
-      if (filterBeneficiaryId !== "all") {
-        if (filterBeneficiaryId === "empty") { if (item.beneficiaryId) return false; }
-        else if (item.beneficiaryId !== Number(filterBeneficiaryId)) return false;
-      }
-      if (searchTerm) {
-        const term = searchTerm.toLowerCase();
-        const matchDesc = item.description?.toLowerCase().includes(term);
-        const matchShort = item.shortTitle?.toLowerCase().includes(term);
-        if (!matchDesc && !matchShort) return false;
-      }
-      return true;
-    });
-  }, [budgetItems, filterType, filterCategoryId, filterSubcategoryId, filterBeneficiaryId, searchTerm]);
-
-  const hasActiveFilters = filterType !== "all" || filterCategoryId !== "all" || filterSubcategoryId !== "all" || filterBeneficiaryId !== "all" || searchTerm;
+  const hasActiveFilters = filterType !== "all" || filterSource !== "all" || filterCategoryId !== "all" || filterSubcategoryId !== "all" || searchTerm;
 
   const clearAllFilters = () => {
     setFilterType("all");
+    setFilterSource("all");
     setFilterCategoryId("all");
     setFilterSubcategoryId("all");
-    setFilterBeneficiaryId("all");
     setSearchTerm("");
   };
+
+  const transactionsByMonth = useMemo(() => {
+    const map = new Map<string, Transaction[]>();
+    for (const t of filteredTransactions) {
+      const m = getTxCompetenciaMonth(t);
+      const list = map.get(m) || [];
+      list.push(t);
+      map.set(m, list);
+    }
+    return map;
+  }, [filteredTransactions]);
 
   const itemsByMonth = useMemo(() => {
     const map = new Map<string, BudgetItem[]>();
@@ -586,34 +898,46 @@ export default function Planejamento() {
   }, [filteredBudgetItems]);
 
   const monthTotals = useMemo(() => {
-    const totals = new Map<string, { receitas: number; despesas: number }>();
-    Array.from(itemsByMonth.entries()).forEach(([month, items]) => {
-      let receitas = 0;
-      let despesas = 0;
-      for (const item of items) {
+    const totals = new Map<string, { receitas: number; despesas: number; receitasReal: number; despesasReal: number }>();
+    const allMonths = new Set(Array.from(itemsByMonth.keys()).concat(Array.from(transactionsByMonth.keys())));
+    allMonths.forEach((month) => {
+      let receitas = 0, despesas = 0, receitasReal = 0, despesasReal = 0;
+      const budgetItems = itemsByMonth.get(month) || [];
+      for (const item of budgetItems) {
         const amount = parseFloat(item.amount);
-        if (item.type === "receita") {
-          receitas += amount;
-        } else {
-          despesas += amount;
-        }
+        if (item.type === "receita") receitas += amount;
+        else despesas += amount;
       }
-      totals.set(month, { receitas, despesas });
+      const txItems = transactionsByMonth.get(month) || [];
+      for (const t of txItems) {
+        const amount = Math.abs(parseFloat(String(t.amount)));
+        if (t.type === "receita") receitasReal += amount;
+        else despesasReal += amount;
+      }
+      totals.set(month, { receitas, despesas, receitasReal, despesasReal });
     });
     return totals;
-  }, [itemsByMonth]);
+  }, [itemsByMonth, transactionsByMonth]);
 
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | null>(null);
 
   const quarterTotals = useMemo(() => {
-    let receitas = 0;
-    let despesas = 0;
+    let receitas = 0, despesas = 0;
     months.forEach((m) => {
       const t = monthTotals.get(m);
-      if (t) { receitas += t.receitas; despesas += t.despesas; }
+      if (t) {
+        if (filterStatus !== "realizada") {
+          receitas += t.receitas;
+          despesas += t.despesas;
+        }
+        if (filterStatus !== "prevista") {
+          receitas += t.receitasReal;
+          despesas += t.despesasReal;
+        }
+      }
     });
     return { receitas, despesas, saldo: receitas - despesas };
-  }, [months, monthTotals]);
+  }, [months, monthTotals, filterStatus]);
 
   const allQuarterItems = useMemo(() => {
     const items: BudgetItem[] = [];
@@ -624,19 +948,171 @@ export default function Planejamento() {
     return items;
   }, [months, itemsByMonth]);
 
+  const allQuarterTransactions = useMemo(() => {
+    const txs: Transaction[] = [];
+    months.forEach((m) => {
+      const monthTx = transactionsByMonth.get(m) || [];
+      txs.push(...monthTx);
+    });
+    return txs;
+  }, [months, transactionsByMonth]);
+
+  const totalItemCount = allQuarterItems.length + allQuarterTransactions.length;
+
+  type UnifiedRow = {
+    _kind: "budget" | "transaction";
+    _id: string;
+    id: number;
+    transactionDate: string | null;
+    billDueDate: string | null;
+    yearMonth: string;
+    shortTitle: string | null;
+    description: string | null;
+    type: string;
+    status: string;
+    source: string | null;
+    categoryId: number | null;
+    subcategoryId: number | null;
+    beneficiaryId: number | null;
+    amount: string;
+    isFromInstallment: boolean;
+    installmentCurrent: number | null;
+    installmentTotal: number | null;
+    isRecurring: boolean;
+    original?: BudgetItem | Transaction;
+  };
+
   const displayItems = useMemo(() => {
-    let items = allQuarterItems;
+    const unified: UnifiedRow[] = [];
+
+    let budgetFiltered = allQuarterItems as BudgetItem[];
     if (selectedCategoryFilter) {
-      items = items.filter((item) => {
+      budgetFiltered = budgetFiltered.filter((item) => {
         const cat = categories.find(c => c.id === item.categoryId);
         return cat?.name === selectedCategoryFilter && item.type === "despesa";
       });
     }
     if (selectedMonth) {
-      items = items.filter(item => item.yearMonth === selectedMonth);
+      budgetFiltered = budgetFiltered.filter(item => item.yearMonth === selectedMonth);
     }
-    return items;
-  }, [selectedCategoryFilter, selectedMonth, allQuarterItems, categories]);
+    if (hiddenChartCategories.size > 0) {
+      budgetFiltered = budgetFiltered.filter(item => {
+        const catName = item.categoryId ? (categories.find(c => c.id === item.categoryId)?.name || null) : null;
+        if (!catName) return true;
+        return !hiddenChartCategories.has(catName);
+      });
+    }
+    for (const item of budgetFiltered) {
+      unified.push({
+        _kind: "budget",
+        _id: `b_${item.id}`,
+        id: item.id,
+        transactionDate: item.transactionDate,
+        billDueDate: item.billDueDate,
+        yearMonth: item.yearMonth,
+        shortTitle: item.shortTitle,
+        description: item.description,
+        type: item.type,
+        status: "prevista",
+        source: item.source || "manual",
+        categoryId: item.categoryId,
+        subcategoryId: item.subcategoryId,
+        beneficiaryId: item.beneficiaryId,
+        amount: String(item.amount),
+        isFromInstallment: item.isFromInstallment || false,
+        installmentCurrent: item.installmentCurrent,
+        installmentTotal: item.installmentTotal,
+        isRecurring: item.isRecurring || false,
+        original: item,
+      });
+    }
+
+    let txFiltered = allQuarterTransactions as Transaction[];
+    if (selectedCategoryFilter) {
+      txFiltered = txFiltered.filter((t) => {
+        const cat = categories.find(c => c.id === t.categoryId);
+        return cat?.name === selectedCategoryFilter && t.type === "despesa";
+      });
+    }
+    if (selectedMonth) {
+      txFiltered = txFiltered.filter(t => getTxCompetenciaMonth(t) === selectedMonth);
+    }
+    if (hiddenChartCategories.size > 0) {
+      txFiltered = txFiltered.filter(t => {
+        const catName = t.categoryId ? (categories.find(c => c.id === t.categoryId)?.name || null) : null;
+        if (!catName) return true;
+        return !hiddenChartCategories.has(catName);
+      });
+    }
+    for (const t of txFiltered) {
+      unified.push({
+        _kind: "transaction",
+        _id: `t_${t.id}`,
+        id: t.id,
+        transactionDate: t.transactionDate || t.date,
+        billDueDate: t.paymentDate || t.cardBillMonth || null,
+        yearMonth: getTxCompetenciaMonth(t),
+        shortTitle: t.shortTitle,
+        description: t.description || t.originalDescription,
+        type: t.type,
+        status: t.status || "realizada",
+        source: t.source || "manual",
+        categoryId: t.categoryId,
+        subcategoryId: t.subcategoryId,
+        beneficiaryId: t.beneficiaryId,
+        amount: String(Math.abs(parseFloat(String(t.amount)))),
+        isFromInstallment: !!(t.installmentTotal && t.installmentTotal > 1),
+        installmentCurrent: t.installmentCurrent,
+        installmentTotal: t.installmentTotal,
+        isRecurring: t.isRecurring || false,
+        original: t,
+      });
+    }
+
+    unified.sort((a, b) => {
+      let aVal: any, bVal: any;
+      switch (sortColumn) {
+        case "transactionDate":
+          aVal = a.transactionDate || ""; bVal = b.transactionDate || ""; break;
+        case "billDueDate":
+          aVal = a.billDueDate || ""; bVal = b.billDueDate || ""; break;
+        case "yearMonth":
+          aVal = a.yearMonth; bVal = b.yearMonth; break;
+        case "shortTitle":
+          aVal = (a.shortTitle || a.description || "").toLowerCase();
+          bVal = (b.shortTitle || b.description || "").toLowerCase(); break;
+        case "categoryId":
+          aVal = categories.find(c => c.id === a.categoryId)?.name || "";
+          bVal = categories.find(c => c.id === b.categoryId)?.name || ""; break;
+        case "subcategoryId":
+          aVal = subcategories.find(s => s.id === a.subcategoryId)?.name || "";
+          bVal = subcategories.find(s => s.id === b.subcategoryId)?.name || ""; break;
+        case "beneficiaryId":
+          aVal = beneficiaries.find(bn => bn.id === a.beneficiaryId)?.name || "";
+          bVal = beneficiaries.find(bn => bn.id === b.beneficiaryId)?.name || ""; break;
+        case "type":
+          aVal = a.type; bVal = b.type; break;
+        case "source":
+          aVal = a.isFromInstallment ? "parcelamento" : a.source || "manual";
+          bVal = b.isFromInstallment ? "parcelamento" : b.source || "manual"; break;
+        case "amount":
+          aVal = parseFloat(a.amount); bVal = parseFloat(b.amount); break;
+        default:
+          aVal = a.yearMonth; bVal = b.yearMonth;
+      }
+      if (aVal < bVal) return sortDirection === "asc" ? -1 : 1;
+      if (aVal > bVal) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+
+    return unified;
+  }, [selectedCategoryFilter, selectedMonth, allQuarterItems, allQuarterTransactions, categories, subcategories, beneficiaries, sortColumn, sortDirection, hiddenChartCategories]);
+
+  const totalPages = Math.max(1, Math.ceil(displayItems.length / ITEMS_PER_PAGE));
+  const paginatedItems = useMemo(() => {
+    const start = (currentPage - 1) * ITEMS_PER_PAGE;
+    return displayItems.slice(start, start + ITEMS_PER_PAGE);
+  }, [displayItems, currentPage]);
 
   const displayTotals = useMemo(() => {
     let receitas = 0, despesas = 0;
@@ -648,7 +1124,59 @@ export default function Planejamento() {
     return { receitas, despesas, saldo: receitas - despesas };
   }, [displayItems]);
 
+  const allBudgetTotals = useMemo(() => {
+    let receitas = 0, despesas = 0, countRec = 0, countDesp = 0;
+    for (const item of filteredBudgetItems) {
+      const amt = parseFloat(item.amount?.toString() || "0");
+      if (item.type === "receita") { receitas += amt; countRec++; }
+      else { despesas += amt; countDesp++; }
+    }
+    for (const t of filteredTransactions) {
+      const amt = Math.abs(parseFloat(String(t.amount)));
+      if (t.type === "receita") { receitas += amt; countRec++; }
+      else { despesas += amt; countDesp++; }
+    }
+    return { receitas, despesas, saldo: receitas - despesas, countRec, countDesp, total: filteredBudgetItems.length + filteredTransactions.length };
+  }, [filteredBudgetItems, filteredTransactions]);
+
+  const toggleSelectAll = (checked: boolean) => {
+    if (checked) {
+      const allIds = new Set(displayItems.filter(r => r._kind === "budget").map((t) => t.id));
+      setSelectedIds(allIds);
+    } else {
+      setSelectedIds(new Set());
+    }
+  };
+
+  const toggleSelectOne = (id: number, checked: boolean) => {
+    const newSet = new Set(selectedIds);
+    if (checked) {
+      newSet.add(id);
+    } else {
+      newSet.delete(id);
+    }
+    setSelectedIds(newSet);
+  };
+
+  const handleBulkShortTitleUpdate = () => {
+    if (selectedIds.size === 0) {
+      toast({ title: "Selecione pelo menos um item", variant: "destructive" });
+      return;
+    }
+    if (!bulkShortTitle.trim()) {
+      toast({ title: "Digite um titulo breve", variant: "destructive" });
+      return;
+    }
+    updateShortTitleBatchMutation.mutate({
+      ids: Array.from(selectedIds),
+      shortTitle: bulkShortTitle.trim(),
+    });
+  };
+
   const chartMonths = useMemo(() => {
+    if (viewMode === "all" && months.length > 0) {
+      return [...months];
+    }
     const result: string[] = [];
     const startMonth = ((selectedQuarter - 1) * 3) + 1;
     const startDate = new Date(selectedYear, startMonth - 7, 1);
@@ -657,7 +1185,7 @@ export default function Planejamento() {
       result.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
     }
     return result;
-  }, [selectedYear, selectedQuarter]);
+  }, [selectedYear, selectedQuarter, viewMode, months]);
 
   const chartMonthsParam = useMemo(() => chartMonths.join(","), [chartMonths]);
 
@@ -684,43 +1212,43 @@ export default function Planejamento() {
     const catColors = new Map<string, string>();
     const monthReceitas = new Map<string, number>();
     const monthDespesas = new Map<string, number>();
-    const monthsWithBudget = new Set<string>();
+    const monthReceitasReal = new Map<string, number>();
+    const monthDespesasReal = new Map<string, number>();
 
-    for (const item of filteredBudgetItems) {
-      if (!chartMonths.includes(item.yearMonth)) continue;
-      monthsWithBudget.add(item.yearMonth);
-      const amount = parseFloat(item.amount?.toString() || "0");
-      if (item.type === "receita") {
-        monthReceitas.set(item.yearMonth, (monthReceitas.get(item.yearMonth) || 0) + amount);
-      } else {
-        monthDespesas.set(item.yearMonth, (monthDespesas.get(item.yearMonth) || 0) + amount);
-        const cat = categories.find(c => c.id === item.categoryId);
-        const catName = cat?.name || "Sem categoria";
-        if (!categoryTotals.has(catName)) categoryTotals.set(catName, new Map());
-        const monthMap = categoryTotals.get(catName)!;
-        monthMap.set(item.yearMonth, (monthMap.get(item.yearMonth) || 0) + amount);
-        if (cat?.color) catColors.set(catName, cat.color);
-      }
-    }
-
-    for (const m of chartMonths) {
-      if (monthsWithBudget.has(m)) continue;
-      const realized = realizedByMonth.get(m);
-      if (!realized) continue;
-      if (realized.receitas > 0) {
-        monthReceitas.set(m, (monthReceitas.get(m) || 0) + realized.receitas);
-      }
-      if (realized.despesas > 0) {
-        monthDespesas.set(m, (monthDespesas.get(m) || 0) + realized.despesas);
-      }
-      if (realized.despesasPorCategoria) {
-        for (const dc of realized.despesasPorCategoria) {
-          const cat = categories.find(c => c.id === dc.categoryId);
+    if (filterStatus !== "realizada") {
+      for (const item of filteredBudgetItems) {
+        if (!chartMonths.includes(item.yearMonth)) continue;
+        const amount = parseFloat(item.amount?.toString() || "0");
+        if (item.type === "receita") {
+          monthReceitas.set(item.yearMonth, (monthReceitas.get(item.yearMonth) || 0) + amount);
+        } else {
+          monthDespesas.set(item.yearMonth, (monthDespesas.get(item.yearMonth) || 0) + amount);
+          const cat = categories.find(c => c.id === item.categoryId);
           const catName = cat?.name || "Sem categoria";
           if (!categoryTotals.has(catName)) categoryTotals.set(catName, new Map());
           const monthMap = categoryTotals.get(catName)!;
-          monthMap.set(m, (monthMap.get(m) || 0) + dc.total);
+          monthMap.set(item.yearMonth, (monthMap.get(item.yearMonth) || 0) + amount);
           if (cat?.color) catColors.set(catName, cat.color);
+        }
+      }
+    }
+
+    if (filterStatus !== "prevista") {
+      for (const m of chartMonths) {
+        const txs = transactionsByMonth.get(m) || [];
+        for (const t of txs) {
+          const amount = Math.abs(parseFloat(String(t.amount)));
+          if (t.type === "receita") {
+            monthReceitasReal.set(m, (monthReceitasReal.get(m) || 0) + amount);
+          } else {
+            monthDespesasReal.set(m, (monthDespesasReal.get(m) || 0) + amount);
+            const cat = categories.find(c => c.id === t.categoryId);
+            const catName = cat?.name || "Sem categoria";
+            if (!categoryTotals.has(catName)) categoryTotals.set(catName, new Map());
+            const monthMap = categoryTotals.get(catName)!;
+            monthMap.set(m, (monthMap.get(m) || 0) + amount);
+            if (cat?.color) catColors.set(catName, cat.color);
+          }
         }
       }
     }
@@ -733,11 +1261,10 @@ export default function Planejamento() {
         if (rec > 0) point.receitas = rec;
         if (desp > 0) point.despesas = desp;
 
-        const realized = realizedByMonth.get(m);
-        if (realized) {
-          if (realized.receitas > 0) point.receitasRealizadas = realized.receitas;
-          if (realized.despesas > 0) point.despesasRealizadas = realized.despesas;
-        }
+        const recReal = monthReceitasReal.get(m) || 0;
+        const despReal = monthDespesasReal.get(m) || 0;
+        if (recReal > 0) point.receitasRealizadas = recReal;
+        if (despReal > 0) point.despesasRealizadas = despReal;
 
         categoryTotals.forEach((monthMap, catName) => {
           const val = monthMap.get(m) || 0;
@@ -748,9 +1275,9 @@ export default function Planejamento() {
       categories: Array.from(categoryTotals.keys()),
       colors: catColors,
     };
-  }, [chartMonths, filteredBudgetItems, categories, realizedByMonth]);
+  }, [chartMonths, filteredBudgetItems, categories, transactionsByMonth, filterStatus]);
 
-  const filteredCategories = categories.filter((c) => c.type === formData.type && c.active);
+  const filteredCategories = categories.filter((c) => c.active);
   const filteredSubcategories = subcategories.filter((s) => s.categoryId === formData.categoryId);
 
   if (isLoading) {
@@ -770,36 +1297,42 @@ export default function Planejamento() {
 
   return (
     <div>
-      <PageHeader title="Visao Planejado" subtitle={getQuarterLabel(selectedQuarter, selectedYear)} selectedMonth={selectedMonth} onMonthChange={handleMonthChange}>
-        <Button variant="outline" size="icon" onClick={() => handleNavigateQuarter(-1)} data-testid="button-prev-quarter">
-          <ChevronLeft className="w-4 h-4" />
-        </Button>
-        <div className="flex items-center gap-0.5">
-          {[1, 2, 3, 4].map((q) => (
-            <Button
-              key={q}
-              variant={selectedQuarter === q ? "default" : "outline"}
-              size="sm"
-              className="text-xs px-2"
-              onClick={() => handleSelectQuarter(q)}
-              data-testid={`button-q${q}`}
-            >
-              Q{q}
+      <PageHeader title="Visao Planejado" subtitle={viewMode === "quarter" ? getQuarterLabel(selectedQuarter, selectedYear) : viewMode === "year" ? String(selectedYear) : "Todos"} selectedMonth={selectedMonth} onMonthChange={handleMonthChange}>
+        {viewMode !== "all" && (
+          <>
+            <Button variant="outline" size="icon" onClick={() => handleNavigateQuarter(-1)} data-testid="button-prev-quarter">
+              <ChevronLeft className="w-4 h-4" />
             </Button>
-          ))}
-        </div>
-        <Button variant="outline" size="icon" onClick={() => handleNavigateQuarter(1)} data-testid="button-next-quarter">
-          <ChevronRight className="w-4 h-4" />
-        </Button>
-        <div className="flex items-center gap-0.5">
-          <Button variant="ghost" size="icon" onClick={() => setSelectedYear(selectedYear - 1)} data-testid="button-prev-year">
-            <ChevronLeft className="w-3 h-3" />
-          </Button>
-          <Badge variant="outline" className="text-xs min-w-[50px] justify-center">{selectedYear}</Badge>
-          <Button variant="ghost" size="icon" onClick={() => setSelectedYear(selectedYear + 1)} data-testid="button-next-year">
-            <ChevronRight className="w-3 h-3" />
-          </Button>
-        </div>
+            <div className="flex items-center gap-0.5">
+              {[1, 2, 3, 4].map((q) => (
+                <Button
+                  key={q}
+                  variant={viewMode === "quarter" && selectedQuarter === q ? "default" : "outline"}
+                  size="sm"
+                  className="text-xs px-2"
+                  onClick={() => { setViewMode("quarter"); handleSelectQuarter(q); }}
+                  data-testid={`button-q${q}`}
+                >
+                  Q{q}
+                </Button>
+              ))}
+            </div>
+            <Button variant="outline" size="icon" onClick={() => handleNavigateQuarter(1)} data-testid="button-next-quarter">
+              <ChevronRight className="w-4 h-4" />
+            </Button>
+          </>
+        )}
+        {viewMode !== "all" && (
+          <div className="flex items-center gap-0.5">
+            <Button variant="ghost" size="icon" onClick={() => setSelectedYear(selectedYear - 1)} data-testid="button-prev-year">
+              <ChevronLeft className="w-3 h-3" />
+            </Button>
+            <Badge variant="outline" className="text-xs min-w-[50px] justify-center">{selectedYear}</Badge>
+            <Button variant="ghost" size="icon" onClick={() => setSelectedYear(selectedYear + 1)} data-testid="button-next-year">
+              <ChevronRight className="w-3 h-3" />
+            </Button>
+          </div>
+        )}
         <Button
           variant="outline"
           size="sm"
@@ -838,6 +1371,26 @@ export default function Planejamento() {
           <RefreshCw className={`w-3 h-3 mr-1 ${syncMutation.isPending ? "animate-spin" : ""}`} />
           Sync
         </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant={viewMode === "year" ? "default" : "outline"}
+            size="sm"
+            className="text-xs px-2"
+            onClick={() => setViewMode(viewMode === "year" ? "quarter" : "year")}
+            data-testid="button-view-year"
+          >
+            Ano
+          </Button>
+          <Button
+            variant={viewMode === "all" ? "default" : "outline"}
+            size="sm"
+            className="text-xs px-2"
+            onClick={() => setViewMode(viewMode === "all" ? "quarter" : "all")}
+            data-testid="button-view-all"
+          >
+            Todos
+          </Button>
+        </div>
       </PageHeader>
 
       <div className="px-4 py-2 space-y-2">
@@ -848,8 +1401,13 @@ export default function Planejamento() {
                 <TrendingUp className="h-3.5 w-3.5 text-success" />
                 <span className="text-xs font-medium">Receitas</span>
               </div>
-              <span className="text-lg font-bold text-success" data-testid="text-plan-receitas">{formatCurrency(displayTotals.receitas)}</span>
-              <span className="text-xs text-muted-foreground ml-1">({displayItems.filter(i => i.type === 'receita').length})</span>
+              <span className="text-lg font-bold text-success" data-testid="text-plan-receitas">{formatCurrency(quarterTotals.receitas)}</span>
+              <span className="text-xs text-muted-foreground ml-1">({allQuarterItems.filter(i => i.type === 'receita').length})</span>
+              {allBudgetTotals.countRec !== allQuarterItems.filter(i => i.type === 'receita').length && (
+                <div className="text-[10px] text-muted-foreground mt-0.5">
+                  Total: {formatCurrency(allBudgetTotals.receitas)} ({allBudgetTotals.countRec})
+                </div>
+              )}
             </CardContent>
           </Card>
           <Card>
@@ -858,8 +1416,13 @@ export default function Planejamento() {
                 <TrendingDown className="h-3.5 w-3.5 text-destructive" />
                 <span className="text-xs font-medium">Despesas</span>
               </div>
-              <span className="text-lg font-bold text-destructive" data-testid="text-plan-despesas">{formatCurrency(displayTotals.despesas)}</span>
-              <span className="text-xs text-muted-foreground ml-1">({displayItems.filter(i => i.type === 'despesa').length})</span>
+              <span className="text-lg font-bold text-destructive" data-testid="text-plan-despesas">{formatCurrency(quarterTotals.despesas)}</span>
+              <span className="text-xs text-muted-foreground ml-1">({allQuarterItems.filter(i => i.type === 'despesa').length})</span>
+              {allBudgetTotals.countDesp !== allQuarterItems.filter(i => i.type === 'despesa').length && (
+                <div className="text-[10px] text-muted-foreground mt-0.5">
+                  Total: {formatCurrency(allBudgetTotals.despesas)} ({allBudgetTotals.countDesp})
+                </div>
+              )}
             </CardContent>
           </Card>
           <Card>
@@ -868,7 +1431,12 @@ export default function Planejamento() {
                 <ArrowUpDown className="h-3.5 w-3.5 text-primary" />
                 <span className="text-xs font-medium">Saldo</span>
               </div>
-              <span className={`text-lg font-bold ${displayTotals.saldo >= 0 ? "text-success" : "text-destructive"}`} data-testid="text-plan-saldo">{formatCurrency(displayTotals.saldo)}</span>
+              <span className={`text-lg font-bold ${quarterTotals.saldo >= 0 ? "text-success" : "text-destructive"}`} data-testid="text-plan-saldo">{formatCurrency(quarterTotals.saldo)}</span>
+              {allBudgetTotals.total !== allQuarterItems.length && (
+                <div className="text-[10px] text-muted-foreground mt-0.5">
+                  Total: {formatCurrency(allBudgetTotals.saldo)}
+                </div>
+              )}
             </CardContent>
           </Card>
           <Card>
@@ -877,17 +1445,34 @@ export default function Planejamento() {
                 <Folder className="h-3.5 w-3.5 text-muted-foreground" />
                 <span className="text-xs font-medium">Itens</span>
               </div>
-              <span className="text-lg font-bold" data-testid="text-plan-count">{displayItems.length}</span>
-              <span className="text-xs text-muted-foreground ml-1">de {allQuarterItems.length}</span>
+              <span className="text-lg font-bold" data-testid="text-plan-count">{totalItemCount}</span>
+              <span className="text-xs text-muted-foreground ml-1">de {allBudgetTotals.total}</span>
             </CardContent>
           </Card>
         </div>
 
-        <div className="grid gap-2 md:grid-cols-3">
+        <div className="relative">
+          <div className="flex items-center gap-1 mb-1">
+            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { if (monthsScrollRef.current) monthsScrollRef.current.scrollLeft = 0; }} data-testid="button-scroll-start">
+              <ChevronsLeft className="w-3.5 h-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { if (monthsScrollRef.current) monthsScrollRef.current.scrollLeft -= 400; }} data-testid="button-scroll-left">
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { if (monthsScrollRef.current) monthsScrollRef.current.scrollLeft += 400; }} data-testid="button-scroll-right">
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { if (monthsScrollRef.current) monthsScrollRef.current.scrollLeft = monthsScrollRef.current.scrollWidth; }} data-testid="button-scroll-end">
+              <ChevronsRight className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+          <div ref={monthsScrollRef} className="overflow-x-auto pb-2" style={{ scrollBehavior: 'smooth' }}>
+            <div className="grid grid-rows-2 grid-flow-col gap-2" style={{ gridAutoColumns: 'minmax(220px, 1fr)' }}>
           {months.map((month) => {
             const items = itemsByMonth.get(month) || [];
-            const expenseData = getExpensesByCategory(items);
-            const totals = monthTotals.get(month) || { receitas: 0, despesas: 0 };
+            const txItems = transactionsByMonth.get(month) || [];
+            const expenseData = getExpensesByCategory(items, txItems);
+            const totals = monthTotals.get(month) || { receitas: 0, despesas: 0, receitasReal: 0, despesasReal: 0 };
             const isCurrentMonth = month === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
             return (
@@ -918,10 +1503,15 @@ export default function Planejamento() {
                         </ResponsiveContainer>
                         <div className="flex-1 space-y-0.5">
                           {expenseData.slice(0, 4).map((entry, index) => (
-                            <div key={index} className="flex items-center justify-between text-[10px]">
+                            <div
+                              key={index}
+                              className="flex items-center justify-between text-[10px] cursor-pointer hover:opacity-70"
+                              onClick={() => setSelectedCategoryFilter(selectedCategoryFilter === entry.name ? null : entry.name)}
+                              data-testid={`pie-legend-${month}-${entry.name}`}
+                            >
                               <div className="flex items-center gap-1">
                                 <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: entry.color }} />
-                                <span className="truncate max-w-[70px]">{entry.name}</span>
+                                <span className={`truncate max-w-[70px] ${selectedCategoryFilter === entry.name ? "font-bold underline" : ""}`}>{entry.name}</span>
                               </div>
                               <span className="font-medium">{formatCurrency(entry.value)}</span>
                             </div>
@@ -933,55 +1523,55 @@ export default function Planejamento() {
                     )}
                   </div>
                   <div className="border-t mt-1 pt-1 space-y-0.5 text-[10px]">
-                    <div className="grid grid-cols-3 gap-1">
-                      <div className="text-center">
-                        <div className="text-muted-foreground">Rec. Plan.</div>
-                        <div className="text-success font-medium opacity-60">{formatCurrency(totals.receitas)}</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-muted-foreground">Desp. Plan.</div>
-                        <div className="text-destructive font-medium opacity-60">{formatCurrency(totals.despesas)}</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-muted-foreground">Saldo Plan.</div>
-                        <div className={`font-medium opacity-60 ${(totals.receitas - totals.despesas) >= 0 ? "text-success" : "text-destructive"}`}>
-                          {formatCurrency(totals.receitas - totals.despesas)}
+                    {filterStatus !== "realizada" && (
+                      <div className="grid grid-cols-3 gap-1">
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Rec. Plan.</div>
+                          <div className="text-success font-medium opacity-60">{formatCurrency(totals.receitas)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Desp. Plan.</div>
+                          <div className="text-destructive font-medium opacity-60">{formatCurrency(totals.despesas)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Saldo Plan.</div>
+                          <div className={`font-medium opacity-60 ${(totals.receitas - totals.despesas) >= 0 ? "text-success" : "text-destructive"}`}>
+                            {formatCurrency(totals.receitas - totals.despesas)}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    {(() => {
-                      const r = realizedByMonth.get(month);
-                      if (!r || (r.receitas === 0 && r.despesas === 0)) return null;
-                      return (
-                        <div className="grid grid-cols-3 gap-1">
-                          <div className="text-center">
-                            <div className="text-muted-foreground">Rec. Real.</div>
-                            <div className="text-success font-semibold">{formatCurrency(r.receitas)}</div>
-                          </div>
-                          <div className="text-center">
-                            <div className="text-muted-foreground">Desp. Real.</div>
-                            <div className="text-destructive font-semibold">{formatCurrency(r.despesas)}</div>
-                          </div>
-                          <div className="text-center">
-                            <div className="text-muted-foreground">Saldo Real.</div>
-                            <div className={`font-semibold ${(r.receitas - r.despesas) >= 0 ? "text-success" : "text-destructive"}`}>
-                              {formatCurrency(r.receitas - r.despesas)}
-                            </div>
+                    )}
+                    {filterStatus !== "prevista" && (totals.receitasReal > 0 || totals.despesasReal > 0) && (
+                      <div className="grid grid-cols-3 gap-1">
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Rec. Real.</div>
+                          <div className="text-success font-semibold">{formatCurrency(totals.receitasReal)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Desp. Real.</div>
+                          <div className="text-destructive font-semibold">{formatCurrency(totals.despesasReal)}</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Saldo Real.</div>
+                          <div className={`font-semibold ${(totals.receitasReal - totals.despesasReal) >= 0 ? "text-success" : "text-destructive"}`}>
+                            {formatCurrency(totals.receitasReal - totals.despesasReal)}
                           </div>
                         </div>
-                      );
-                    })()}
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
             );
           })}
+            </div>
+          </div>
         </div>
       </div>
 
-      <Card className="sticky top-[40px] z-40 rounded-none border-x-0">
+      <Card className="mx-4">
         <CardContent className="p-2">
-          <div className="grid gap-2 md:grid-cols-2">
+          <div className="grid gap-2 grid-cols-1">
             <div>
               <span className="text-[10px] font-medium mb-0.5 block">Planejado vs Realizado</span>
               {chartData.data.some(d => d.receitas || d.despesas || d.receitasRealizadas || d.despesasRealizadas) ? (() => {
@@ -999,17 +1589,32 @@ export default function Planejamento() {
                         formatter={(value: number, name: string) => [formatCurrency(value), name]}
                         contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px', fontSize: '10px' }}
                       />
-                      <Legend wrapperStyle={{ fontSize: '8px', paddingTop: '2px' }} iconSize={8} />
-                      <Bar dataKey="receitas" name="Rec. Planejado" fill="#10B981" radius={[3, 3, 0, 0]} opacity={0.4}>
+                      <Legend
+                        wrapperStyle={{ fontSize: '8px', paddingTop: '2px', cursor: 'pointer' }}
+                        iconSize={8}
+                        onClick={(e: any) => {
+                          if (e?.dataKey) {
+                            setHiddenBarSeries(prev => {
+                              const next = new Set(prev);
+                              if (next.has(e.dataKey)) next.delete(e.dataKey); else next.add(e.dataKey);
+                              return next;
+                            });
+                          }
+                        }}
+                        formatter={(value: string, entry: any) => (
+                          <span style={{ color: hiddenBarSeries.has(entry.dataKey) ? "hsl(var(--muted-foreground))" : entry.color, textDecoration: hiddenBarSeries.has(entry.dataKey) ? "line-through" : "none" }}>{value}</span>
+                        )}
+                      />
+                      <Bar dataKey="receitas" name="Rec. Planejado" fill="#10B981" radius={[3, 3, 0, 0]} opacity={0.4} hide={hiddenBarSeries.has("receitas")}>
                         <LabelList dataKey="receitas" position="top" fontSize={8} fill="#10B981" formatter={(v: number) => formatK(v)} />
                       </Bar>
-                      <Bar dataKey="receitasRealizadas" name="Rec. Realizado" fill="#10B981" radius={[3, 3, 0, 0]}>
+                      <Bar dataKey="receitasRealizadas" name="Rec. Realizado" fill="#10B981" radius={[3, 3, 0, 0]} hide={hiddenBarSeries.has("receitasRealizadas")}>
                         <LabelList dataKey="receitasRealizadas" position="top" fontSize={8} fill="#10B981" formatter={(v: number) => formatK(v)} />
                       </Bar>
-                      <Bar dataKey="despesas" name="Desp. Planejado" fill="#EF4444" radius={[3, 3, 0, 0]} opacity={0.4}>
+                      <Bar dataKey="despesas" name="Desp. Planejado" fill="#EF4444" radius={[3, 3, 0, 0]} opacity={0.4} hide={hiddenBarSeries.has("despesas")}>
                         <LabelList dataKey="despesas" position="top" fontSize={8} fill="#EF4444" formatter={(v: number) => formatK(v)} />
                       </Bar>
-                      <Bar dataKey="despesasRealizadas" name="Desp. Realizado" fill="#EF4444" radius={[3, 3, 0, 0]}>
+                      <Bar dataKey="despesasRealizadas" name="Desp. Realizado" fill="#EF4444" radius={[3, 3, 0, 0]} hide={hiddenBarSeries.has("despesasRealizadas")}>
                         <LabelList dataKey="despesasRealizadas" position="top" fontSize={8} fill="#EF4444" formatter={(v: number) => formatK(v)} />
                       </Bar>
                     </BarChart>
@@ -1038,8 +1643,10 @@ export default function Planejamento() {
                 const totalData = chartData.data.map(d => {
                   let total = 0;
                   chartData.categories.forEach(cat => {
-                    const val = d[cat];
-                    if (typeof val === 'number') total += val;
+                    if (!hiddenChartCategories.has(cat)) {
+                      const val = d[cat];
+                      if (typeof val === 'number') total += val;
+                    }
                   });
                   return {
                     ...d,
@@ -1048,7 +1655,56 @@ export default function Planejamento() {
                   };
                 });
                 const CHART_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
+                const legendEntries: Array<{ name: string; color: string }> = [
+                  ...chartData.categories.map((catName, idx) => ({
+                    name: catName,
+                    color: chartData.colors.get(catName) || CHART_COLORS[idx % CHART_COLORS.length],
+                  })),
+                  { name: "Total Planejado", color: "hsl(var(--foreground))" },
+                  { name: "Total Realizado", color: "#F59E0B" },
+                ];
                 return (
+                  <>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 mb-1 items-center">
+                    {(() => {
+                      const allNames = legendEntries.map(e => e.name);
+                      const allHidden = allNames.every(n => hiddenChartCategories.has(n));
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (allHidden) {
+                              setHiddenChartCategories(new Set());
+                            } else {
+                              setHiddenChartCategories(new Set(allNames));
+                            }
+                          }}
+                          className="text-[9px] text-muted-foreground hover:text-foreground underline mr-1"
+                          data-testid="button-toggle-all-chart-categories"
+                        >
+                          {allHidden ? "Marcar todos" : "Desmarcar todos"}
+                        </button>
+                      );
+                    })()}
+                    {legendEntries.map(({ name, color }) => {
+                      const isVisible = !hiddenChartCategories.has(name);
+                      return (
+                        <label key={name} className="flex items-center gap-1 cursor-pointer select-none" data-testid={`chart-legend-${name}`}>
+                          <Checkbox
+                            checked={isVisible}
+                            onCheckedChange={() => {
+                              const next = new Set(hiddenChartCategories);
+                              if (isVisible) next.add(name); else next.delete(name);
+                              setHiddenChartCategories(next);
+                            }}
+                            className="h-3 w-3"
+                            style={{ borderColor: color, backgroundColor: isVisible ? color : "transparent" }}
+                          />
+                          <span className="text-[10px]" style={{ color: isVisible ? color : "hsl(var(--muted-foreground))" }}>{name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
                   <ResponsiveContainer width="100%" height={200}>
                     <LineChart data={totalData} margin={{ top: 16, right: 10, bottom: 0, left: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
@@ -1058,49 +1714,78 @@ export default function Planejamento() {
                         formatter={(value: number, name: string) => [formatCurrency(value), name === '_total' ? 'Total Planejado' : name === '_totalRealizado' ? 'Total Realizado' : name]}
                         contentStyle={{ backgroundColor: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '6px', fontSize: '10px' }}
                       />
-                      <Legend
-                        formatter={(value: string) => value === '_total' ? 'Total Planejado' : value === '_totalRealizado' ? 'Total Realizado' : value}
-                        wrapperStyle={{ fontSize: '8px', paddingTop: '2px' }}
-                        iconSize={8}
-                      />
-                      {chartData.categories.map((catName, idx) => (
+                      {chartData.categories
+                        .filter(catName => !hiddenChartCategories.has(catName))
+                        .map((catName, idx) => {
+                        const lineColor = chartData.colors.get(catName) || CHART_COLORS[idx % CHART_COLORS.length];
+                        return (
                         <Line
                           key={catName}
                           type="monotone"
                           dataKey={catName}
                           name={catName}
-                          stroke={chartData.colors.get(catName) || CHART_COLORS[idx % CHART_COLORS.length]}
+                          stroke={lineColor}
                           strokeWidth={1.5}
-                          dot={{ fill: chartData.colors.get(catName) || CHART_COLORS[idx % CHART_COLORS.length], strokeWidth: 1, r: 2 }}
+                          dot={{ fill: lineColor, strokeWidth: 1, r: 2 }}
                           activeDot={{ r: 4, cursor: "pointer" }}
                           connectNulls
-                        />
-                      ))}
-                      <Line
-                        type="monotone"
-                        dataKey="_total"
-                        name="Total Planejado"
-                        stroke="hsl(var(--foreground))"
-                        strokeWidth={2.5}
-                        dot={{ fill: 'hsl(var(--foreground))', strokeWidth: 0, r: 3 }}
-                        activeDot={{ r: 5 }}
-                        connectNulls
-                      >
-                        <LabelList content={renderTotalLabel} />
-                      </Line>
-                      <Line
-                        type="monotone"
-                        dataKey="_totalRealizado"
-                        name="Total Realizado"
-                        stroke="#F59E0B"
-                        strokeWidth={2}
-                        strokeDasharray="5 3"
-                        dot={{ fill: '#F59E0B', strokeWidth: 0, r: 3 }}
-                        activeDot={{ r: 5 }}
-                        connectNulls
-                      />
+                        >
+                          <LabelList
+                            content={(props: any) => {
+                              const { x, y, value } = props;
+                              if (value === undefined || value === null || value === 0) return null;
+                              return (
+                                <text x={x} y={y - 6} textAnchor="middle" fill={lineColor} fontSize={8}>
+                                  {formatK(Number(value))}
+                                </text>
+                              );
+                            }}
+                          />
+                        </Line>
+                        );
+                      })}
+                      {!hiddenChartCategories.has("Total Planejado") && (
+                        <Line
+                          type="monotone"
+                          dataKey="_total"
+                          name="Total Planejado"
+                          stroke="hsl(var(--foreground))"
+                          strokeWidth={2.5}
+                          dot={{ fill: 'hsl(var(--foreground))', strokeWidth: 0, r: 3 }}
+                          activeDot={{ r: 5 }}
+                          connectNulls
+                        >
+                          <LabelList content={renderTotalLabel} />
+                        </Line>
+                      )}
+                      {!hiddenChartCategories.has("Total Realizado") && (
+                        <Line
+                          type="monotone"
+                          dataKey="_totalRealizado"
+                          name="Total Realizado"
+                          stroke="#F59E0B"
+                          strokeWidth={2}
+                          strokeDasharray="5 3"
+                          dot={{ fill: '#F59E0B', strokeWidth: 0, r: 3 }}
+                          activeDot={{ r: 5 }}
+                          connectNulls
+                        >
+                          <LabelList
+                            content={(props: any) => {
+                              const { x, y, value } = props;
+                              if (value === undefined || value === null) return null;
+                              return (
+                                <text x={x} y={y + 14} textAnchor="middle" fill="#F59E0B" fontSize={9} fontWeight={600}>
+                                  {formatK(Number(value))}
+                                </text>
+                              );
+                            }}
+                          />
+                        </Line>
+                      )}
                     </LineChart>
                   </ResponsiveContainer>
+                  </>
                 );
               })() : (
                 <div className="h-[200px] flex items-center justify-center text-muted-foreground text-xs">Nenhum dado disponivel</div>
@@ -1140,6 +1825,33 @@ export default function Planejamento() {
               </Select>
             </div>
             <div className="flex flex-col gap-1">
+              <Label className="text-xs text-muted-foreground">Visao</Label>
+              <Select value={filterStatus} onValueChange={(v) => setFilterStatus(v as any)}>
+                <SelectTrigger className="w-[90px] h-8 text-xs" data-testid="filter-plan-status">
+                  <SelectValue placeholder="Visao" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Ambos</SelectItem>
+                  <SelectItem value="prevista">Planejado</SelectItem>
+                  <SelectItem value="realizada">Realizado</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-muted-foreground">Orig.</Label>
+              <Select value={filterSource} onValueChange={(v) => setFilterSource(v)}>
+                <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-plan-source">
+                  <SelectValue placeholder="Orig." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos</SelectItem>
+                  <SelectItem value="manual">Manual</SelectItem>
+                  <SelectItem value="import">Import</SelectItem>
+                  <SelectItem value="parcelamento">Parc.</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1">
               <Label className="text-xs text-muted-foreground">Categoria</Label>
               <Select value={filterCategoryId} onValueChange={(v) => { setFilterCategoryId(v); setFilterSubcategoryId("all"); }}>
                 <SelectTrigger className="w-[110px] h-8 text-xs" data-testid="filter-plan-category">
@@ -1171,21 +1883,6 @@ export default function Planejamento() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Beneficiario</Label>
-              <Select value={filterBeneficiaryId} onValueChange={(v) => setFilterBeneficiaryId(v)}>
-                <SelectTrigger className="w-[100px] h-8 text-xs" data-testid="filter-plan-beneficiary">
-                  <SelectValue placeholder="Benefic." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="empty">Vazio</SelectItem>
-                  {beneficiaries.filter(b => b.active).map((b) => (
-                    <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
             {hasActiveFilters && (
               <Button variant="ghost" size="sm" className="text-xs" onClick={clearAllFilters} data-testid="button-clear-filters">
                 <X className="w-3 h-3 mr-0.5" />
@@ -1207,98 +1904,213 @@ export default function Planejamento() {
               <p className="text-sm">Clique em "Novo" para adicionar um item</p>
             </div>
           ) : (
-            <div className="overflow-hidden">
+            <>
+            {selectedIds.size > 0 && (
+              <div className="flex flex-wrap items-center gap-2 mb-4 p-3 bg-muted/50 rounded-md">
+                <Badge variant="secondary">
+                  {selectedIds.size} selecionado(s)
+                </Badge>
+                <Input
+                  placeholder="Titulo breve..."
+                  value={bulkShortTitle}
+                  onChange={(e) => setBulkShortTitle(e.target.value)}
+                  className="w-[200px]"
+                  data-testid="input-bulk-short-title"
+                />
+                <Button
+                  size="sm"
+                  onClick={handleBulkShortTitleUpdate}
+                  disabled={updateShortTitleBatchMutation.isPending || !bulkShortTitle.trim()}
+                  data-testid="button-apply-bulk-short-title"
+                >
+                  Aplicar Titulo
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={batchDeleteMutation.isPending}
+                  data-testid="button-bulk-delete"
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-1" />
+                  Excluir Selecionados
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setSelectedIds(new Set()); setBulkShortTitle(""); }}
+                  data-testid="button-clear-selection"
+                >
+                  Limpar Selecao
+                </Button>
+              </div>
+            )}
+            <div>
               <Table className="text-xs table-fixed w-full">
                 <colgroup>
-                  <col style={{ width: colWidths.mes || 60 }} />
+                  <col style={{ width: colWidths.checkbox ? `${colWidths.checkbox}px` : undefined }} />
+                  <col style={{ width: colWidths.dtTrans }} />
+                  <col style={{ width: colWidths.vencFat }} />
                   <col />
-                  <col style={{ width: colWidths.categoria || 36 }} />
-                  <col style={{ width: colWidths.subcategoria || 80 }} />
-                  <col style={{ width: colWidths.beneficiario || 80 }} />
-                  <col style={{ width: colWidths.tipo || 40 }} />
-                  <col style={{ width: colWidths.info || 50 }} />
-                  <col style={{ width: colWidths.valor || 85 }} />
-                  <col style={{ width: colWidths.acoes || 60 }} />
+                  <col style={{ width: colWidths.tipo }} />
+                  <col style={{ width: colWidths.status }} />
+                  <col style={{ width: colWidths.orig }} />
+                  <col style={{ width: colWidths.categoria }} />
+                  <col style={{ width: colWidths.subcategoria }} />
+                  <col style={{ width: colWidths.valor }} />
+                  <col style={{ width: colWidths.acoes }} />
                 </colgroup>
-                <TableHeader>
-                  <TableRow className="h-7">
-                    <TableHead className="py-1 text-xs relative">Mes<ResizeHandle col="mes" /></TableHead>
-                    <TableHead className="py-1 text-xs relative">Descricao</TableHead>
-                    <TableHead className="py-1 text-xs relative">Cat.<ResizeHandle col="categoria" /></TableHead>
-                    <TableHead className="py-1 text-xs relative">Subcateg.<ResizeHandle col="subcategoria" /></TableHead>
-                    <TableHead className="py-1 text-xs relative">Benefic.<ResizeHandle col="beneficiario" /></TableHead>
-                    <TableHead className="py-1 text-xs relative">Tipo<ResizeHandle col="tipo" /></TableHead>
-                    <TableHead className="py-1 text-xs relative">Info<ResizeHandle col="info" /></TableHead>
-                    <TableHead className="py-1 text-xs text-right relative">Valor<ResizeHandle col="valor" /></TableHead>
-                    <TableHead className="py-1 text-xs relative">Acoes<ResizeHandle col="acoes" /></TableHead>
+                <TableHeader className="sticky top-[40px] z-40">
+                  <TableRow className="h-7 bg-card">
+                    <TableHead className="py-1">
+                      <Checkbox
+                        checked={displayItems.length > 0 && displayItems.every((t) => selectedIds.has(t.id))}
+                        onCheckedChange={toggleSelectAll}
+                        data-testid="checkbox-select-all"
+                      />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("transactionDate")}>
+                      <div className="flex items-center">Dt.Trans.<SortIcon column="transactionDate" /></div>
+                      <ResizeHandle col="dtTrans" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("billDueDate")}>
+                      <div className="flex items-center">Venc.Fat.<SortIcon column="billDueDate" /></div>
+                      <ResizeHandle col="vencFat" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("shortTitle")}>
+                      <div className="flex items-center">Descricao<SortIcon column="shortTitle" /></div>
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("type")}>
+                      <div className="flex items-center">Tipo<SortIcon column="type" /></div>
+                      <ResizeHandle col="tipo" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs relative">
+                      Visao
+                      <ResizeHandle col="status" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("source")}>
+                      <div className="flex items-center">Orig.<SortIcon column="source" /></div>
+                      <ResizeHandle col="orig" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("categoryId")}>
+                      <div className="flex items-center">Cat.<SortIcon column="categoryId" /></div>
+                      <ResizeHandle col="categoria" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer relative" onClick={() => handleSort("subcategoryId")}>
+                      <div className="flex items-center">Subcateg.<SortIcon column="subcategoryId" /></div>
+                      <ResizeHandle col="subcategoria" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs cursor-pointer text-right relative" onClick={() => handleSort("amount")}>
+                      <div className="flex items-center justify-end">Valor<SortIcon column="amount" /></div>
+                      <ResizeHandle col="valor" onResizeStart={handleResizeStart} />
+                    </TableHead>
+                    <TableHead className="py-1 text-xs relative">Acoes<ResizeHandle col="acoes" onResizeStart={handleResizeStart} /></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {displayItems.map((item) => {
+                  {paginatedItems.map((item) => {
                     const cat = categories.find(c => c.id === item.categoryId);
                     const sub = subcategories.find(s => s.id === item.subcategoryId);
-                    const ben = beneficiaries.find(b => b.id === item.beneficiaryId);
                     return (
-                      <TableRow key={item.id} className="h-8" data-testid={`item-row-${item.id}`}>
-                        <TableCell className="py-0.5 text-xs truncate overflow-hidden">{getMonthName(item.yearMonth)}</TableCell>
-                        <TableCell className="py-0.5 overflow-hidden">
-                          <span className="font-medium text-xs truncate block" title={item.description}>
-                            {item.shortTitle || item.description}
-                          </span>
+                      <TableRow key={item._id} className="h-10" data-testid={`item-row-${item._id}`}>
+                        <TableCell className="py-1.5">
+                          {item._kind === "budget" && (
+                            <Checkbox
+                              checked={selectedIds.has(item.id)}
+                              onCheckedChange={(checked) => toggleSelectOne(item.id, !!checked)}
+                              data-testid={`checkbox-select-${item._id}`}
+                            />
+                          )}
                         </TableCell>
-                        <TableCell className="py-0.5 overflow-hidden">
+                        <TableCell className="py-1.5 text-xs whitespace-nowrap">{formatDate(item.transactionDate)}</TableCell>
+                        <TableCell className="py-1.5 text-xs whitespace-nowrap">{formatDate(item.billDueDate)}</TableCell>
+                        <TableCell className="py-1.5 overflow-hidden">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="font-medium text-sm truncate block cursor-default">
+                                {item.shortTitle || item.description}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>{item.description}</TooltipContent>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          <Badge variant="outline" className={`text-[10px] px-1 py-0 font-bold ${item.type === "receita" ? "border-green-600 text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950" : "border-red-600 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950"}`}>
+                            {item.type === "receita" ? "R" : "D"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          {item._kind === "budget" ? (
+                            <Badge variant="outline" className="text-[10px] px-1 py-0 border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950">
+                              Plan
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px] px-1 py-0 border-emerald-500 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950">
+                              Real
+                            </Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="cursor-default">
+                                {item._kind === "transaction" && item.source === "cartao" ? (
+                                  <CreditCard className="w-3.5 h-3.5 text-purple-500" />
+                                ) : item._kind === "transaction" && item.source === "conta_corrente" ? (
+                                  <Building2 className="w-3.5 h-3.5 text-blue-500" />
+                                ) : (item.isFromInstallment || item.source === "import") ? (
+                                  <CreditCard className="w-3.5 h-3.5 text-purple-500" />
+                                ) : (
+                                  <PenLine className="w-3.5 h-3.5 text-muted-foreground" />
+                                )}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {item._kind === "transaction" ? (
+                                item.source === "cartao" ? "Cartao" : item.source === "conta_corrente" ? "Conta Corrente" : "Manual"
+                              ) : (
+                                item.isFromInstallment ? `Parcelamento${item.installmentCurrent && item.installmentTotal ? ` ${item.installmentCurrent}/${item.installmentTotal}` : ""}` : item.source === "import" ? "Importado" : "Manual"
+                              )}
+                              {item.isRecurring ? " (Recorrente)" : ""}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell className="py-1.5 overflow-hidden">
                           {cat ? (
                             <CategoryIcon iconName={cat.icon} color={cat.color} categoryName={cat.name} size="sm" />
                           ) : <span className="text-xs text-muted-foreground">-</span>}
                         </TableCell>
-                        <TableCell className="py-0.5 text-xs text-muted-foreground truncate overflow-hidden">
+                        <TableCell className="py-1.5 text-xs text-muted-foreground truncate overflow-hidden">
                           {sub?.name || "-"}
                         </TableCell>
-                        <TableCell className="py-0.5 text-xs text-muted-foreground truncate overflow-hidden">
-                          {ben?.name || "-"}
-                        </TableCell>
-                        <TableCell className="py-0.5">
-                          <Badge variant={item.type === "receita" ? "default" : "secondary"} className="text-[10px] px-1 py-0">
-                            {item.type === "receita" ? (
-                              <TrendingUp className="w-3 h-3" />
-                            ) : (
-                              <TrendingDown className="w-3 h-3" />
-                            )}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            {item.isFromInstallment && <CreditCard className="w-3 h-3 text-muted-foreground" />}
-                            {item.isRecurring && <Repeat className="w-3 h-3 text-muted-foreground" />}
-                            {item.installmentCurrent && item.installmentTotal && (
-                              <span className="text-[10px] text-muted-foreground">{item.installmentCurrent}/{item.installmentTotal}</span>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell className={`py-0.5 text-right font-medium text-xs whitespace-nowrap ${item.type === "receita" ? "text-success" : "text-destructive"}`}>
+                        <TableCell className={`py-1.5 text-right font-medium text-xs whitespace-nowrap ${item.type === "receita" ? "text-success" : "text-destructive"}`}>
                           {item.type === "receita" ? "+" : "-"}{formatCurrency(item.amount)}
                         </TableCell>
-                        <TableCell className="py-0.5">
-                          <div className="flex items-center gap-0">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6"
-                              onClick={() => handleEditItem(item)}
-                              data-testid={`button-edit-${item.id}`}
-                            >
-                              <Edit2 className="w-3 h-3 text-primary" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6"
-                              onClick={() => { if (confirm("Excluir este item?")) deleteMutation.mutate(item.id); }}
-                              data-testid={`button-delete-${item.id}`}
-                            >
-                              <Trash2 className="w-3 h-3 text-destructive" />
-                            </Button>
-                          </div>
+                        <TableCell className="py-1.5">
+                          {item._kind === "budget" ? (
+                            <div className="flex items-center gap-0">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                onClick={() => handleEditItem(item.original as BudgetItem)}
+                                data-testid={`button-edit-${item._id}`}
+                              >
+                                <Edit2 className="w-3 h-3 text-primary" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                onClick={() => { if (confirm("Excluir este item?")) deleteMutation.mutate(item.id); }}
+                                data-testid={`button-delete-${item._id}`}
+                              >
+                                <Trash2 className="w-3 h-3 text-destructive" />
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">-</span>
+                          )}
                         </TableCell>
                       </TableRow>
                     );
@@ -1306,10 +2118,10 @@ export default function Planejamento() {
                 </TableBody>
                 <TableFooter>
                   <TableRow className="h-7 bg-muted/50 font-medium">
-                    <TableCell colSpan={2} className="py-0.5 text-xs">
+                    <TableCell colSpan={3} className="py-0.5 text-xs">
                       {displayItems.length} item(ns)
                     </TableCell>
-                    <TableCell colSpan={5} className="py-0.5"></TableCell>
+                    <TableCell colSpan={6} className="py-0.5"></TableCell>
                     <TableCell className="py-0.5 text-right text-xs whitespace-nowrap">
                       <div className="flex flex-col">
                         <span className="text-success">+{formatCurrency(displayTotals.receitas)}</span>
@@ -1322,6 +2134,52 @@ export default function Planejamento() {
                 </TableFooter>
               </Table>
             </div>
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-2 border-t" data-testid="pagination-controls">
+                <span className="text-xs text-muted-foreground">
+                  Pagina {currentPage} de {totalPages} ({displayItems.length} itens)
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage <= 1}
+                    onClick={() => setCurrentPage(1)}
+                    data-testid="button-first-page"
+                  >
+                    <ChevronsLeft className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage <= 1}
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    data-testid="button-prev-page"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage >= totalPages}
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    data-testid="button-next-page"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage >= totalPages}
+                    onClick={() => setCurrentPage(totalPages)}
+                    data-testid="button-last-page"
+                  >
+                    <ChevronsRight className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            )}
+            </>
           )}
         </CardContent>
       </Card>
@@ -1402,12 +2260,17 @@ export default function Planejamento() {
                 </Select>
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Valor</Label>
+                <Label className="text-xs">Valor (R$)</Label>
                 <Input
-                  type="number"
-                  step="0.01"
-                  value={formData.amount}
-                  onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                  type="text"
+                  inputMode="numeric"
+                  value={formData.amountDisplay}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, "");
+                    const display = formatBRLInput(raw);
+                    const amount = parseBRLInput(display);
+                    setFormData({ ...formData, amountDisplay: display, amount });
+                  }}
                   placeholder="0,00"
                   data-testid="input-amount"
                 />
@@ -1415,18 +2278,32 @@ export default function Planejamento() {
               <div className="space-y-1">
                 <Label className="text-xs">Data Transacao</Label>
                 <Input
-                  type="date"
-                  value={formData.transactionDate}
-                  onChange={(e) => setFormData({ ...formData, transactionDate: e.target.value })}
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="DD/MM/AAAA"
+                  maxLength={10}
+                  value={formData.transactionDateDisplay}
+                  onChange={(e) => {
+                    const display = formatDateInputBR(e.target.value, formData.transactionDateDisplay);
+                    const iso = parseDateBR(display);
+                    setFormData({ ...formData, transactionDateDisplay: display, transactionDate: display === "" ? "" : (iso || formData.transactionDate) });
+                  }}
                   data-testid="input-transaction-date"
                 />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Vencimento Fatura</Label>
                 <Input
-                  type="date"
-                  value={formData.billDueDate}
-                  onChange={(e) => setFormData({ ...formData, billDueDate: e.target.value })}
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="DD/MM/AAAA"
+                  maxLength={10}
+                  value={formData.billDueDateDisplay}
+                  onChange={(e) => {
+                    const display = formatDateInputBR(e.target.value, formData.billDueDateDisplay);
+                    const iso = parseDateBR(display);
+                    setFormData({ ...formData, billDueDateDisplay: display, billDueDate: display === "" ? "" : (iso || formData.billDueDate) });
+                  }}
                   data-testid="input-bill-due-date"
                 />
               </div>
@@ -1526,54 +2403,126 @@ export default function Planejamento() {
               />
             </div>
 
-            {!editingItem && (
-              <>
-                <div className="flex items-center space-x-2">
-                  <Checkbox
-                    id="recurring"
-                    checked={formData.isRecurring}
-                    onCheckedChange={(c) => setFormData({ ...formData, isRecurring: !!c, divideMonths: 1 })}
-                    data-testid="checkbox-recurring"
-                  />
-                  <Label htmlFor="recurring">Recorrente (repetir por N meses)</Label>
-                </div>
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="recurring"
+                checked={formData.isRecurring}
+                onCheckedChange={(c) => setFormData({ ...formData, isRecurring: !!c, divideMonths: 1, repeatMode: !!c ? "count" : "none" })}
+                data-testid="checkbox-recurring"
+              />
+              <Label htmlFor="recurring">Recorrente</Label>
+            </div>
 
-                {formData.isRecurring && (
-                  <div className="space-y-2">
-                    <Label>Repetir por quantos meses? (0 = indefinido)</Label>
+            {formData.isRecurring && (
+              <div className="space-y-2 border rounded-md p-3">
+                <Label className="text-xs font-medium">Repetir lancamento</Label>
+                <div className="flex gap-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={formData.repeatMode === "none" ? "default" : "outline"}
+                    onClick={() => setFormData({ ...formData, repeatMode: "none", repeatMonths: 0 })}
+                    data-testid="btn-repeat-none"
+                  >Indefinido</Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={formData.repeatMode === "count" ? "default" : "outline"}
+                    onClick={() => setFormData({ ...formData, repeatMode: "count", repeatMonths: 12 })}
+                    data-testid="btn-repeat-count"
+                  >Repetir N vezes</Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={formData.repeatMode === "until" ? "default" : "outline"}
+                    onClick={() => {
+                      const now = new Date();
+                      const futureMonth = now.getMonth() + 7;
+                      const futureYear = now.getFullYear() + Math.floor(futureMonth / 12);
+                      const fm = (futureMonth % 12) + 1;
+                      setFormData({ ...formData, repeatMode: "until", repeatUntil: `${String(fm).padStart(2, "0")}/${futureYear}` });
+                    }}
+                    data-testid="btn-repeat-until"
+                  >Repetir ate</Button>
+                </div>
+                {formData.repeatMode === "none" && (
+                  <p className="text-xs text-muted-foreground">Item sera repetido por 60 meses (5 anos)</p>
+                )}
+                {formData.repeatMode === "count" && (
+                  <div className="space-y-1">
+                    <Label className="text-xs">Quantos meses? (0 = indefinido, 60 meses)</Label>
                     <Input
                       type="number"
                       min="0"
                       max="120"
                       value={formData.repeatMonths}
-                      onChange={(e) => setFormData({ ...formData, repeatMonths: parseInt(e.target.value) || 0 })}
+                      onChange={(e) => setFormData({ ...formData, repeatMonths: Math.max(0, parseInt(e.target.value) || 0) })}
                       data-testid="input-repeat-months"
                     />
-                    {formData.repeatMonths === 0 && (
-                      <p className="text-xs text-muted-foreground">Item sera repetido por 60 meses (5 anos)</p>
-                    )}
+                    <p className="text-xs text-muted-foreground">
+                      {formData.repeatMonths === 0 ? "60 meses (indefinido)" : `${formData.repeatMonths} mes(es)`} a partir de {selectedMonth || "mes selecionado"}
+                    </p>
                   </div>
                 )}
+                {formData.repeatMode === "until" && (() => {
+                  let monthCount = 0;
+                  if (formData.repeatUntil && selectedMonth) {
+                    const parts = formData.repeatUntil.split("/");
+                    if (parts.length === 2) {
+                      const untilM = parseInt(parts[0]);
+                      const untilY = parseInt(parts[1]);
+                      const [startY, startM] = selectedMonth.split("-").map(Number);
+                      monthCount = (untilY - startY) * 12 + (untilM - startM) + 1;
+                      if (monthCount < 1) monthCount = 0;
+                    }
+                  }
+                  return (
+                    <div className="space-y-1">
+                      <Label className="text-xs">Repetir ate</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="text"
+                          placeholder="MM/AAAA"
+                          value={formData.repeatUntil}
+                          onChange={(e) => {
+                            let val = e.target.value.replace(/[^\d/]/g, "");
+                            if (val.length === 2 && !val.includes("/") && !formData.repeatUntil.endsWith("/")) {
+                              val += "/";
+                            }
+                            if (val.length > 7) val = val.slice(0, 7);
+                            setFormData({ ...formData, repeatUntil: val });
+                          }}
+                          maxLength={7}
+                          className="w-32"
+                          data-testid="input-repeat-until"
+                        />
+                        {monthCount > 0 && (
+                          <span className="text-xs text-muted-foreground">({monthCount} meses)</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
 
-                {!formData.isRecurring && (
-                  <div className="space-y-2">
-                    <Label>Dividir em quantos meses? (1 = sem divisao)</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      max="24"
-                      value={formData.divideMonths}
-                      onChange={(e) => setFormData({ ...formData, divideMonths: parseInt(e.target.value) || 1 })}
-                      data-testid="input-divide-months"
-                    />
-                    {formData.divideMonths > 1 && formData.amount && (
-                      <p className="text-xs text-muted-foreground">
-                        Valor por mes: {formatCurrency(parseFloat(formData.amount) / formData.divideMonths)}
-                      </p>
-                    )}
-                  </div>
+            {!editingItem && !formData.isRecurring && (
+              <div className="space-y-2">
+                <Label>Dividir em quantos meses? (1 = sem divisao)</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="24"
+                  value={formData.divideMonths}
+                  onChange={(e) => setFormData({ ...formData, divideMonths: parseInt(e.target.value) || 1 })}
+                  data-testid="input-divide-months"
+                />
+                {formData.divideMonths > 1 && formData.amount && (
+                  <p className="text-xs text-muted-foreground">
+                    Valor por mes: {formatCurrency(parseFloat(formData.amount) / formData.divideMonths)}
+                  </p>
                 )}
-              </>
+              </div>
             )}
 
             <div className="flex justify-between pt-4">
@@ -1597,10 +2546,23 @@ export default function Planejamento() {
                 </Button>
                 <Button
                   onClick={handleSubmit}
-                  disabled={createMutation.isPending || updateMutation.isPending}
+                  disabled={createMutation.isPending || updateMutation.isPending || isSaving}
                   data-testid="button-save"
                 >
-                  {editingItem ? "Salvar" : "Adicionar"}
+                  {editingItem ? "Salvar" : (() => {
+                    if (!formData.isRecurring && formData.divideMonths <= 1) return "Adicionar";
+                    let count = formData.divideMonths > 1 ? formData.divideMonths : formData.repeatMonths;
+                    if (formData.isRecurring && (formData.repeatMode === "none" || formData.repeatMonths === 0)) count = 60;
+                    if (formData.isRecurring && formData.repeatMode === "until" && formData.repeatUntil) {
+                      const parts = formData.repeatUntil.split("/");
+                      if (parts.length === 2 && selectedMonth) {
+                        const um = parseInt(parts[0]), uy = parseInt(parts[1]);
+                        const [sy, sm] = selectedMonth.split("-").map(Number);
+                        count = (uy - sy) * 12 + (um - sm) + 1;
+                      }
+                    }
+                    return count > 1 ? `Criar ${count} itens` : "Adicionar";
+                  })()}
                 </Button>
               </div>
             </div>
@@ -1714,6 +2676,33 @@ export default function Planejamento() {
                 Criar
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-destructive" />
+              Confirmar Exclusao em Massa
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Tem certeza que deseja excluir <strong>{selectedIds.size}</strong> itens selecionados? Esta acao nao pode ser desfeita.
+          </p>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setShowDeleteConfirm(false)} data-testid="button-cancel-bulk-delete">
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => batchDeleteMutation.mutate(Array.from(selectedIds))}
+              disabled={batchDeleteMutation.isPending}
+              data-testid="button-confirm-bulk-delete"
+            >
+              {batchDeleteMutation.isPending ? "Excluindo..." : "Excluir"}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

@@ -42,7 +42,7 @@ import { PageHeader } from "@/components/page-header";
 
 const categoryFormSchema = z.object({
   name: z.string().min(1, "Nome e obrigatorio"),
-  type: z.enum(["receita", "despesa"]),
+  type: z.enum(["receita", "despesa"]).default("despesa"),
   color: z.string().default("#3B82F6"),
   icon: z.string().optional(),
 });
@@ -314,28 +314,6 @@ export default function Categorias() {
 
                       <FormField
                         control={categoryForm.control}
-                        name="type"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Tipo</FormLabel>
-                            <Select onValueChange={field.onChange} value={field.value}>
-                              <FormControl>
-                                <SelectTrigger data-testid="select-category-type">
-                                  <SelectValue placeholder="Selecione" />
-                                </SelectTrigger>
-                              </FormControl>
-                              <SelectContent>
-                                <SelectItem value="receita">Receita</SelectItem>
-                                <SelectItem value="despesa">Despesa</SelectItem>
-                              </SelectContent>
-                            </Select>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-
-                      <FormField
-                        control={categoryForm.control}
                         name="color"
                         render={({ field }) => (
                           <FormItem>
@@ -422,7 +400,6 @@ export default function Categorias() {
                     <TableRow>
                       <TableHead className="py-1.5 w-[50px]">Icone</TableHead>
                       <TableHead className="py-1.5">Nome</TableHead>
-                      <TableHead className="py-1.5">Tipo</TableHead>
                       <TableHead className="py-1.5">Status</TableHead>
                       <TableHead className="w-[80px] py-1.5">Acoes</TableHead>
                     </TableRow>
@@ -438,11 +415,6 @@ export default function Categorias() {
                           />
                         </TableCell>
                         <TableCell className="font-medium py-1.5">{category.name}</TableCell>
-                        <TableCell className="py-1.5">
-                          <Badge variant={category.type === "receita" ? "default" : "secondary"}>
-                            {category.type}
-                          </Badge>
-                        </TableCell>
                         <TableCell className="py-1.5">
                           <Badge variant={category.active ? "default" : "outline"}>
                             {category.active ? "Ativo" : "Inativo"}

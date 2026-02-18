@@ -59,6 +59,9 @@ export default function Admin() {
   const [isResetting, setIsResetting] = useState(false);
   const [showResetDialog, setShowResetDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
+  const [showDeleteTableDialog, setShowDeleteTableDialog] = useState(false);
+  const [deleteTableKey, setDeleteTableKey] = useState<string | null>(null);
+  const [isDeletingTable, setIsDeletingTable] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importPreview, setImportPreview] = useState<Record<string, number> | null>(null);
 
@@ -186,6 +189,37 @@ export default function Admin() {
     }
   };
 
+  const DEPENDENCY_LABELS: Record<string, string[]> = {
+    categories: ["Planejamento", "Contas a Pagar", "Transacoes", "Subcategorias"],
+    subcategories: ["Planejamento", "Contas a Pagar", "Transacoes"],
+    bankAccounts: ["Transacoes"],
+    beneficiaries: ["Planejamento", "Contas a Pagar", "Transacoes"],
+  };
+
+  const handleDeleteTable = async () => {
+    if (!deleteTableKey) return;
+    setIsDeletingTable(true);
+    try {
+      await apiRequest("POST", "/api/admin/delete-table", { table: deleteTableKey });
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/stats"] });
+      await queryClient.invalidateQueries();
+      setShowDeleteTableDialog(false);
+      setDeleteTableKey(null);
+      toast({
+        title: "Tabela excluida",
+        description: `Dados da tabela ${TABLE_LABELS[deleteTableKey] || deleteTableKey} removidos com sucesso.`,
+      });
+    } catch (error) {
+      toast({
+        title: "Erro ao excluir tabela",
+        description: "Nao foi possivel excluir os dados da tabela.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsDeletingTable(false);
+    }
+  };
+
   const handleReset = async () => {
     setIsResetting(true);
     setShowResetDialog(false);
@@ -236,14 +270,28 @@ export default function Admin() {
                   {Object.entries(stats).map(([key, count]) => (
                     <div
                       key={key}
-                      className="flex items-center justify-between p-2 rounded-md bg-muted/50"
+                      className="flex items-center justify-between gap-1 p-2 rounded-md bg-muted/50"
                     >
                       <span className="text-xs text-muted-foreground">
                         {TABLE_LABELS[key] || key}
                       </span>
-                      <Badge variant="secondary" className="text-xs">
-                        {Number(count)}
-                      </Badge>
+                      <div className="flex items-center gap-1">
+                        <Badge variant="secondary" className="text-xs">
+                          {Number(count)}
+                        </Badge>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          disabled={Number(count) === 0 || isDeletingTable}
+                          onClick={() => {
+                            setDeleteTableKey(key);
+                            setShowDeleteTableDialog(true);
+                          }}
+                          data-testid={`button-delete-table-${key}`}
+                        >
+                          <Trash2 className="w-3 h-3 text-destructive" />
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -381,10 +429,45 @@ export default function Admin() {
             <AlertDialogCancel data-testid="button-reset-cancel">Cancelar</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleReset}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className="bg-destructive text-destructive-foreground"
               data-testid="button-reset-confirm"
             >
               Sim, Zerar Tudo
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showDeleteTableDialog} onOpenChange={setShowDeleteTableDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-destructive" />
+              Excluir Tabela: {deleteTableKey ? TABLE_LABELS[deleteTableKey] || deleteTableKey : ""}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <span className="block">
+                Todos os <strong>{deleteTableKey && stats ? Number((stats as any)[deleteTableKey]) : 0} registros</strong> da tabela <strong>{deleteTableKey ? TABLE_LABELS[deleteTableKey] || deleteTableKey : ""}</strong> serao removidos.
+              </span>
+              {deleteTableKey && DEPENDENCY_LABELS[deleteTableKey] && (
+                <span className="block text-destructive font-semibold">
+                  As seguintes tabelas dependentes tambem serao limpas: {DEPENDENCY_LABELS[deleteTableKey].join(", ")}
+                </span>
+              )}
+              <span className="block font-semibold text-destructive">
+                Esta acao nao pode ser desfeita.
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-delete-table-cancel">Cancelar</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteTable}
+              className="bg-destructive text-destructive-foreground"
+              data-testid="button-delete-table-confirm"
+            >
+              {isDeletingTable ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Trash2 className="w-4 h-4 mr-2" />}
+              Sim, Excluir
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

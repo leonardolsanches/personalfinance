@@ -1,8 +1,7 @@
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, desc, and, sql, isNull, or, inArray, asc, not } from "drizzle-orm";
-import Database from "better-sqlite3";
-import { existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import pkg from "pg";
+const { Pool } = pkg;
 import {
   categories,
   subcategories,
@@ -30,134 +29,11 @@ import {
   type BudgetItem,
 } from "@shared/schema";
 
-const dbPath = process.env.SQLITE_DB_PATH || "data/finance.db";
-const dir = dirname(dbPath);
-if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-console.log(`[SQLite] Database path: ${require("path").resolve(dbPath)}`);
-const sqlite = new Database(dbPath);
-sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("foreign_keys = ON");
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
-sqlite.exec(`
-  CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    type TEXT NOT NULL,
-    color TEXT DEFAULT '#3B82F6',
-    icon TEXT,
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS subcategories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    category_id INTEGER NOT NULL REFERENCES categories(id),
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS bank_accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    bank_name TEXT,
-    account_type TEXT,
-    balance TEXT DEFAULT '0',
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS beneficiaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    active INTEGER DEFAULT 1,
-    is_default INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    description TEXT NOT NULL,
-    original_description TEXT,
-    short_title TEXT,
-    amount TEXT NOT NULL,
-    type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'prevista',
-    date TEXT NOT NULL,
-    transaction_date TEXT,
-    payment_date TEXT,
-    category_id INTEGER REFERENCES categories(id),
-    subcategory_id INTEGER REFERENCES subcategories(id),
-    bank_account_id INTEGER REFERENCES bank_accounts(id),
-    beneficiary_id INTEGER REFERENCES beneficiaries(id),
-    notes TEXT,
-    imported_from TEXT,
-    imported_from_row INTEGER,
-    source TEXT DEFAULT 'manual',
-    needs_categorization INTEGER DEFAULT 0,
-    is_recurring INTEGER DEFAULT 0,
-    recurring_months INTEGER,
-    recurring_group_id TEXT,
-    is_refund INTEGER DEFAULT 0,
-    is_fraud_suspect INTEGER DEFAULT 0,
-    is_card_bill_payment INTEGER DEFAULT 0,
-    installment_current INTEGER,
-    installment_total INTEGER,
-    installment_group_id TEXT,
-    card_bill_month TEXT,
-    card_type TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS payables (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    description TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    due_date TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pendente',
-    category_id INTEGER REFERENCES categories(id),
-    subcategory_id INTEGER REFERENCES subcategories(id),
-    is_installment INTEGER DEFAULT 0,
-    installment_number INTEGER,
-    total_installments INTEGER,
-    parent_payable_id INTEGER,
-    notes TEXT,
-    paid_at TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS categorization_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern TEXT NOT NULL,
-    category_id INTEGER NOT NULL REFERENCES categories(id),
-    subcategory_id INTEGER REFERENCES subcategories(id),
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS budget_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    description TEXT NOT NULL,
-    short_title TEXT,
-    type TEXT NOT NULL,
-    category_id INTEGER REFERENCES categories(id),
-    subcategory_id INTEGER REFERENCES subcategories(id),
-    beneficiary_id INTEGER REFERENCES beneficiaries(id),
-    year_month TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    transaction_date TEXT,
-    bill_due_date TEXT,
-    is_recurring INTEGER DEFAULT 0,
-    is_from_installment INTEGER DEFAULT 0,
-    installment_group_id TEXT,
-    installment_current INTEGER,
-    installment_total INTEGER,
-    source TEXT DEFAULT 'manual',
-    notes TEXT,
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-`);
-console.log("[SQLite] All tables created/verified successfully");
-
-export const db = drizzle(sqlite);
-export { sqlite };
+export const db = drizzle(pool);
 
 export interface IStorage {
   getCategories(): Promise<Category[]>;
@@ -242,6 +118,7 @@ export interface IStorage {
   createBudgetItems(items: InsertBudgetItem[]): Promise<BudgetItem[]>;
   updateBudgetItem(id: number, data: Partial<InsertBudgetItem>): Promise<BudgetItem | undefined>;
   deleteBudgetItem(id: number): Promise<void>;
+  deleteBudgetItemsByIds(ids: number[]): Promise<void>;
   syncInstallmentsToBudget(): Promise<number>;
   syncBudgetItemsForGroup(installmentGroupId: string, data: { categoryId: number | null; subcategoryId: number | null; beneficiaryId: number | null }): Promise<void>;
   getHistoricalSuggestions(categoryId?: number, subcategoryId?: number): Promise<{ description: string; amount: number; count: number }[]>;
@@ -595,16 +472,18 @@ export class DatabaseStorage implements IStorage {
       return true;
     };
 
-    // Filtrar transações do mês de referência:
-    // - Extrato (conta_corrente): usar data da transação
-    // - Cartão: usar cardBillMonth do mesmo mês (fatura paga neste mês)
-    const currentMonthTransactions = allTransactions.filter(t => {
-      if (t.source === 'cartao') {
-        return t.cardBillMonth === currentMonthStr;
-      } else {
-        const date = new Date(t.date);
-        return date.getMonth() === currentMonth && date.getFullYear() === currentYear;
+    const getCompetenciaMonth = (t: typeof allTransactions[0]): string => {
+      if (t.paymentDate) {
+        const d = new Date(t.paymentDate);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
       }
+      if (t.source === "cartao" && t.cardBillMonth) return t.cardBillMonth;
+      const d = new Date(t.date);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    };
+
+    const currentMonthTransactions = allTransactions.filter(t => {
+      return getCompetenciaMonth(t) === currentMonthStr;
     });
 
     const realizedTransactions = currentMonthTransactions.filter(t => t.status === "realizada");
@@ -675,12 +554,7 @@ export class DatabaseStorage implements IStorage {
     const transacoesPorMes = chartMonths.map(({ label, monthIndex, year }) => {
       const targetMonth = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
       const monthTransactions = allTransactions.filter((t) => {
-        if (t.source === "cartao" && t.cardBillMonth) {
-          return t.cardBillMonth === targetMonth;
-        } else {
-          const date = new Date(t.date);
-          return date.getMonth() === monthIndex && date.getFullYear() === year;
-        }
+        return getCompetenciaMonth(t) === targetMonth;
       });
 
       return {
@@ -738,13 +612,7 @@ export class DatabaseStorage implements IStorage {
         const categoryExpenses = allTransactions
           .filter((t) => {
             if (t.type !== "despesa" || shouldExcludeBillPayment(t) || t.categoryId !== category.id) return false;
-            
-            if (t.source === "cartao" && t.cardBillMonth) {
-              return t.cardBillMonth === targetMonth;
-            } else {
-              const date = new Date(t.date);
-              return date.getMonth() === monthIndex && date.getFullYear() === year;
-            }
+            return getCompetenciaMonth(t) === targetMonth;
           })
           .reduce((sum, t) => sum + parseFloat(String(t.amount)), 0);
         
@@ -757,13 +625,7 @@ export class DatabaseStorage implements IStorage {
         .filter((t) => {
           if (t.type !== "despesa" || shouldExcludeBillPayment(t)) return false;
           if (t.categoryId && despesaCategories.some(c => c.id === t.categoryId)) return false;
-          
-          if (t.source === "cartao" && t.cardBillMonth) {
-            return t.cardBillMonth === targetMonth;
-          } else {
-            const date = new Date(t.date);
-            return date.getMonth() === monthIndex && date.getFullYear() === year;
-          }
+          return getCompetenciaMonth(t) === targetMonth;
         })
         .reduce((sum, t) => sum + parseFloat(String(t.amount)), 0);
       
@@ -1130,6 +992,38 @@ export class DatabaseStorage implements IStorage {
     await db.update(budgetItems).set({ active: false }).where(eq(budgetItems.id, id));
   }
 
+  async syncRecurringBudgetItems(
+    sourceItem: BudgetItem,
+    syncFields: Partial<InsertBudgetItem>
+  ): Promise<number> {
+    if (!sourceItem.recurringGroupId) return 0;
+    const result = await db
+      .update(budgetItems)
+      .set({ ...syncFields, updatedAt: new Date() })
+      .where(
+        and(
+          eq(budgetItems.recurringGroupId, sourceItem.recurringGroupId),
+          eq(budgetItems.active, true),
+          sql`${budgetItems.yearMonth} > ${sourceItem.yearMonth}`
+        )
+      )
+      .returning();
+    return result.length;
+  }
+
+  async getBudgetItemsByRecurringGroup(recurringGroupId: string): Promise<BudgetItem[]> {
+    return db
+      .select()
+      .from(budgetItems)
+      .where(
+        and(
+          eq(budgetItems.recurringGroupId, recurringGroupId),
+          eq(budgetItems.active, true)
+        )
+      )
+      .orderBy(budgetItems.yearMonth);
+  }
+
   async syncInstallmentsToBudget(): Promise<number> {
     const now = new Date();
     const currentYearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -1266,6 +1160,7 @@ export class DatabaseStorage implements IStorage {
       }
       
       // Also update ALL existing budget items for this group (including past months) with latest description/shortTitle
+      // First update description/category for all items
       await db.update(budgetItems)
         .set({
           description: updated.description,
@@ -1281,6 +1176,45 @@ export class DatabaseStorage implements IStorage {
             eq(budgetItems.active, true)
           )
         );
+
+      // Fix any budget items in this group that have missing dates
+      const itemsWithMissingDates = await db
+        .select()
+        .from(budgetItems)
+        .where(
+          and(
+            eq(budgetItems.installmentGroupId, groupId),
+            eq(budgetItems.active, true),
+            or(
+              sql`${budgetItems.transactionDate} IS NULL`,
+              sql`${budgetItems.billDueDate} IS NULL`
+            )
+          )
+        );
+
+      for (const item of itemsWithMissingDates) {
+        // Calculate billDueDate from yearMonth (day 9, adjusted for weekends)
+        const [ym_year, ym_month] = item.yearMonth.split("-").map(Number);
+        let itemBillDue = new Date(ym_year, ym_month - 1, 9);
+        const dow = itemBillDue.getDay();
+        if (dow === 0) itemBillDue.setDate(10);
+        if (dow === 6) itemBillDue.setDate(11);
+        const itemBillDueStr = itemBillDue.toISOString().split("T")[0];
+
+        // Find matching transaction for this installment to get the original transaction date
+        const matchingTx = allInstallments.find(
+          tx => tx.installmentGroupId === groupId && tx.cardBillMonth === item.yearMonth
+        );
+        const txDate = matchingTx?.date || t.date;
+
+        await db.update(budgetItems)
+          .set({
+            transactionDate: item.transactionDate || txDate,
+            billDueDate: item.billDueDate || itemBillDueStr,
+            updatedAt: new Date(),
+          })
+          .where(eq(budgetItems.id, item.id));
+      }
     }
     return count;
   }
@@ -1312,7 +1246,7 @@ export class DatabaseStorage implements IStorage {
     let query = db
       .select({
         description: transactions.shortTitle,
-        amount: sql<number>`AVG(CAST(${transactions.amount} AS REAL))`,
+        amount: sql<number>`AVG(CAST(${transactions.amount} AS NUMERIC))`,
         count: sql<number>`COUNT(*)`,
       })
       .from(transactions)
@@ -1348,9 +1282,9 @@ export class DatabaseStorage implements IStorage {
     const results = await db
       .select({
         shortTitle: sql<string>`COALESCE(${transactions.shortTitle}, ${transactions.description})`,
-        amount: sql<string>`CAST(ROUND(AVG(CAST(${transactions.amount} AS REAL)), 2) AS TEXT)`,
-        categoryId: sql<number | null>`MIN(${transactions.categoryId})`,
-        subcategoryId: sql<number | null>`MIN(${transactions.subcategoryId})`,
+        amount: sql<string>`ROUND(AVG(CAST(${transactions.amount} AS NUMERIC)), 2)::text`,
+        categoryId: sql<number | null>`MODE() WITHIN GROUP (ORDER BY ${transactions.categoryId})`,
+        subcategoryId: sql<number | null>`MODE() WITHIN GROUP (ORDER BY ${transactions.subcategoryId})`,
         count: sql<number>`COUNT(*)`,
       })
       .from(transactions)
@@ -1381,32 +1315,32 @@ export class DatabaseStorage implements IStorage {
   async findDuplicateTransactions(): Promise<{ date: string; description: string; amount: string; type: string; count: number; ids: number[]; sources: string[]; importedFromList: string[] }[]> {
     // Agrupar por date, description, amount, type E installment_current para não confundir parcelas diferentes
     // Também excluir transações que fazem parte de parcelamentos (têm installment_total > 1) com installment_current diferentes
-    const results = sqlite.prepare(`
+    const results = await db.execute(sql`
       SELECT 
-        date as date, 
+        date::text as date, 
         description, 
-        amount as amount, 
+        amount::text as amount, 
         type,
-        COUNT(*) as count,
-        GROUP_CONCAT(id) as ids,
-        GROUP_CONCAT(DISTINCT COALESCE(source, 'manual')) as sources,
-        GROUP_CONCAT(DISTINCT CASE WHEN imported_from IS NOT NULL THEN imported_from END) as imported_from_list
+        COUNT(*)::int as count,
+        ARRAY_AGG(id ORDER BY id) as ids,
+        ARRAY_AGG(DISTINCT COALESCE(source, 'manual')) as sources,
+        ARRAY_AGG(DISTINCT imported_from) FILTER (WHERE imported_from IS NOT NULL) as imported_from_list
       FROM transactions 
       GROUP BY date, description, amount, type, COALESCE(installment_current, 0)
       HAVING COUNT(*) > 1
       ORDER BY date DESC, COUNT(*) DESC
       LIMIT 100
-    `).all();
+    `);
     
-    return (results as any[]).map(row => ({
+    return (results.rows as any[]).map(row => ({
       date: row.date,
       description: row.description,
       amount: row.amount,
       type: row.type,
       count: row.count,
-      ids: row.ids ? row.ids.split(',').map(Number) : [],
-      sources: row.sources ? row.sources.split(',') : [],
-      importedFromList: row.imported_from_list ? row.imported_from_list.split(',').filter(Boolean) : [],
+      ids: Array.isArray(row.ids) ? row.ids : [],
+      sources: Array.isArray(row.sources) ? row.sources : [],
+      importedFromList: Array.isArray(row.imported_from_list) ? row.imported_from_list : [],
     }));
   }
 
@@ -1444,6 +1378,11 @@ export class DatabaseStorage implements IStorage {
   async deleteTransactionsByIds(ids: number[]): Promise<void> {
     if (ids.length === 0) return;
     await db.delete(transactions).where(inArray(transactions.id, ids));
+  }
+
+  async deleteBudgetItemsByIds(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    await db.delete(budgetItems).where(inArray(budgetItems.id, ids));
   }
 
   async flipTransactionType(ids: number[]): Promise<void> {

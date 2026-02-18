@@ -20,6 +20,7 @@ import {
   Building2,
   ClipboardCheck,
   Database,
+  BarChart3,
 } from "lucide-react";
 import {
   Sidebar,
@@ -36,7 +37,7 @@ import {
 
 const mainMenuItems = [
   {
-    title: "Visao Realizado",
+    title: "Visão Geral",
     url: "/",
     icon: LayoutDashboard,
   },
@@ -46,14 +47,14 @@ const mainMenuItems = [
     icon: ArrowUpDown,
   },
   {
-    title: "Planejar",
-    url: "/planejamento",
-    icon: CalendarDays,
-  },
-  {
     title: "Visao Planejado",
     url: "/consulta-planejamento",
     icon: Search,
+  },
+  {
+    title: "Planejar",
+    url: "/planejamento",
+    icon: CalendarDays,
   },
   {
     title: "Categorizar",
@@ -117,6 +118,11 @@ const settingsMenuItems = [
     title: "Pendencias Import",
     url: "/pendencias-importacao",
     icon: ClipboardCheck,
+  },
+  {
+    title: "Media Mensal",
+    url: "/media-categorias",
+    icon: BarChart3,
   },
   {
     title: "Regras Auto",
