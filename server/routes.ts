@@ -2378,93 +2378,77 @@ export async function registerRoutes(
 
       const t = data.tables;
       const imported: Record<string, number> = {};
-
-      await db.delete(budgetItems);
-      await db.delete(payables);
-      await db.delete(transactions);
-      await db.delete(categorizationRules);
-      await db.delete(subcategories);
-      await db.delete(categories);
-      await db.delete(beneficiaries);
-      await db.delete(bankAccounts);
+      const now = new Date().toISOString();
 
       if (t.categories?.length) {
-        await db.execute(sql`ALTER SEQUENCE categories_id_seq RESTART WITH 1`);
         for (const row of t.categories) {
-          await db.execute(sql`INSERT INTO categories (id, name, type, color, icon, active, created_at) VALUES (${row.id}, ${row.name}, ${row.type}, ${row.color}, ${row.icon}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO categories (id, name, type, color, icon, active, created_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.name}, ${row.type}, ${row.color}, ${row.icon}, ${row.active}, ${row.createdAt || now}) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, type = EXCLUDED.type, color = EXCLUDED.color, icon = EXCLUDED.icon, active = EXCLUDED.active`);
         }
         const maxId = Math.max(...t.categories.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE categories_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('categories_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.categories = t.categories.length;
       }
 
       if (t.subcategories?.length) {
-        await db.execute(sql`ALTER SEQUENCE subcategories_id_seq RESTART WITH 1`);
         for (const row of t.subcategories) {
-          await db.execute(sql`INSERT INTO subcategories (id, name, category_id, active, created_at) VALUES (${row.id}, ${row.name}, ${row.categoryId}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO subcategories (id, name, category_id, active, created_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.name}, ${row.categoryId}, ${row.active}, ${row.createdAt || now}) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, category_id = EXCLUDED.category_id, active = EXCLUDED.active`);
         }
         const maxId = Math.max(...t.subcategories.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE subcategories_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('subcategories_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.subcategories = t.subcategories.length;
       }
 
       if (t.bankAccounts?.length) {
-        await db.execute(sql`ALTER SEQUENCE bank_accounts_id_seq RESTART WITH 1`);
         for (const row of t.bankAccounts) {
-          await db.execute(sql`INSERT INTO bank_accounts (id, name, bank_name, account_type, balance, active, created_at) VALUES (${row.id}, ${row.name}, ${row.bankName}, ${row.accountType}, ${row.balance}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO bank_accounts (id, name, bank_name, account_type, balance, active, created_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.name}, ${row.bankName}, ${row.accountType}, ${row.balance}, ${row.active}, ${row.createdAt || now}) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, bank_name = EXCLUDED.bank_name, account_type = EXCLUDED.account_type, balance = EXCLUDED.balance, active = EXCLUDED.active`);
         }
         const maxId = Math.max(...t.bankAccounts.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE bank_accounts_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('bank_accounts_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.bankAccounts = t.bankAccounts.length;
       }
 
       if (t.beneficiaries?.length) {
-        await db.execute(sql`ALTER SEQUENCE beneficiaries_id_seq RESTART WITH 1`);
         for (const row of t.beneficiaries) {
-          await db.execute(sql`INSERT INTO beneficiaries (id, name, active, is_default, created_at) VALUES (${row.id}, ${row.name}, ${row.active}, ${row.isDefault}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO beneficiaries (id, name, active, is_default, created_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.name}, ${row.active}, ${row.isDefault}, ${row.createdAt || now}) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, active = EXCLUDED.active, is_default = EXCLUDED.is_default`);
         }
         const maxId = Math.max(...t.beneficiaries.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE beneficiaries_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('beneficiaries_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.beneficiaries = t.beneficiaries.length;
       }
 
       if (t.categorizationRules?.length) {
-        await db.execute(sql`ALTER SEQUENCE categorization_rules_id_seq RESTART WITH 1`);
         for (const row of t.categorizationRules) {
-          await db.execute(sql`INSERT INTO categorization_rules (id, pattern, category_id, subcategory_id, active, created_at) VALUES (${row.id}, ${row.pattern}, ${row.categoryId}, ${row.subcategoryId}, ${row.active}, ${row.createdAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO categorization_rules (id, pattern, category_id, subcategory_id, active, created_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.pattern}, ${row.categoryId}, ${row.subcategoryId}, ${row.active}, ${row.createdAt || now}) ON CONFLICT (id) DO UPDATE SET pattern = EXCLUDED.pattern, category_id = EXCLUDED.category_id, subcategory_id = EXCLUDED.subcategory_id, active = EXCLUDED.active`);
         }
         const maxId = Math.max(...t.categorizationRules.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE categorization_rules_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('categorization_rules_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.categorizationRules = t.categorizationRules.length;
       }
 
       if (t.transactions?.length) {
-        await db.execute(sql`ALTER SEQUENCE transactions_id_seq RESTART WITH 1`);
         for (const row of t.transactions) {
-          await db.execute(sql`INSERT INTO transactions (id, description, original_description, short_title, amount, type, status, date, transaction_date, payment_date, category_id, subcategory_id, bank_account_id, beneficiary_id, notes, imported_from, imported_from_row, source, needs_categorization, is_recurring, recurring_months, recurring_group_id, is_refund, is_fraud_suspect, is_card_bill_payment, installment_current, installment_total, installment_group_id, card_bill_month, card_type, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.originalDescription}, ${row.shortTitle}, ${row.amount}, ${row.type}, ${row.status}, ${row.date}, ${row.transactionDate}, ${row.paymentDate}, ${row.categoryId}, ${row.subcategoryId}, ${row.bankAccountId}, ${row.beneficiaryId}, ${row.notes || null}, ${row.importedFrom}, ${row.importedFromRow}, ${row.source}, ${row.needsCategorization}, ${row.isRecurring}, ${row.recurringMonths || null}, ${row.recurringGroupId || null}, ${row.isRefund}, ${row.isFraudSuspect || false}, ${row.isCardBillPayment}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.installmentGroupId}, ${row.cardBillMonth}, ${row.cardType || null}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO transactions (id, description, original_description, short_title, amount, type, status, date, transaction_date, payment_date, category_id, subcategory_id, bank_account_id, beneficiary_id, notes, imported_from, imported_from_row, source, needs_categorization, is_recurring, recurring_months, recurring_group_id, is_refund, is_fraud_suspect, is_card_bill_payment, installment_current, installment_total, installment_group_id, card_bill_month, card_type, created_at, updated_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.description}, ${row.originalDescription}, ${row.shortTitle}, ${row.amount}, ${row.type}, ${row.status}, ${row.date}, ${row.transactionDate}, ${row.paymentDate}, ${row.categoryId}, ${row.subcategoryId}, ${row.bankAccountId}, ${row.beneficiaryId}, ${row.notes || null}, ${row.importedFrom}, ${row.importedFromRow}, ${row.source}, ${row.needsCategorization}, ${row.isRecurring}, ${row.recurringMonths || null}, ${row.recurringGroupId || null}, ${row.isRefund}, ${row.isFraudSuspect || false}, ${row.isCardBillPayment}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.installmentGroupId}, ${row.cardBillMonth}, ${row.cardType || null}, ${row.createdAt || now}, ${row.updatedAt || now}) ON CONFLICT (id) DO UPDATE SET description = EXCLUDED.description, original_description = EXCLUDED.original_description, short_title = EXCLUDED.short_title, amount = EXCLUDED.amount, type = EXCLUDED.type, status = EXCLUDED.status, date = EXCLUDED.date, transaction_date = EXCLUDED.transaction_date, payment_date = EXCLUDED.payment_date, category_id = EXCLUDED.category_id, subcategory_id = EXCLUDED.subcategory_id, bank_account_id = EXCLUDED.bank_account_id, beneficiary_id = EXCLUDED.beneficiary_id, notes = EXCLUDED.notes, imported_from = EXCLUDED.imported_from, imported_from_row = EXCLUDED.imported_from_row, source = EXCLUDED.source, needs_categorization = EXCLUDED.needs_categorization, is_recurring = EXCLUDED.is_recurring, recurring_months = EXCLUDED.recurring_months, recurring_group_id = EXCLUDED.recurring_group_id, is_refund = EXCLUDED.is_refund, is_fraud_suspect = EXCLUDED.is_fraud_suspect, is_card_bill_payment = EXCLUDED.is_card_bill_payment, installment_current = EXCLUDED.installment_current, installment_total = EXCLUDED.installment_total, installment_group_id = EXCLUDED.installment_group_id, card_bill_month = EXCLUDED.card_bill_month, card_type = EXCLUDED.card_type, updated_at = EXCLUDED.updated_at`);
         }
         const maxId = Math.max(...t.transactions.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE transactions_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('transactions_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.transactions = t.transactions.length;
       }
 
       if (t.payables?.length) {
-        await db.execute(sql`ALTER SEQUENCE payables_id_seq RESTART WITH 1`);
         for (const row of t.payables) {
-          await db.execute(sql`INSERT INTO payables (id, description, amount, due_date, status, category_id, subcategory_id, is_installment, installment_number, total_installments, parent_payable_id, notes, paid_at, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.amount}, ${row.dueDate}, ${row.status}, ${row.categoryId}, ${row.subcategoryId}, ${row.isInstallment}, ${row.installmentNumber}, ${row.totalInstallments}, ${row.parentPayableId}, ${row.notes}, ${row.paidAt}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO payables (id, description, amount, due_date, status, category_id, subcategory_id, is_installment, installment_number, total_installments, parent_payable_id, notes, paid_at, created_at, updated_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.description}, ${row.amount}, ${row.dueDate}, ${row.status}, ${row.categoryId}, ${row.subcategoryId}, ${row.isInstallment}, ${row.installmentNumber}, ${row.totalInstallments}, ${row.parentPayableId}, ${row.notes}, ${row.paidAt}, ${row.createdAt || now}, ${row.updatedAt || now}) ON CONFLICT (id) DO UPDATE SET description = EXCLUDED.description, amount = EXCLUDED.amount, due_date = EXCLUDED.due_date, status = EXCLUDED.status, category_id = EXCLUDED.category_id, subcategory_id = EXCLUDED.subcategory_id, is_installment = EXCLUDED.is_installment, installment_number = EXCLUDED.installment_number, total_installments = EXCLUDED.total_installments, parent_payable_id = EXCLUDED.parent_payable_id, notes = EXCLUDED.notes, paid_at = EXCLUDED.paid_at, updated_at = EXCLUDED.updated_at`);
         }
         const maxId = Math.max(...t.payables.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE payables_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('payables_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.payables = t.payables.length;
       }
 
       if (t.budgetItems?.length) {
-        await db.execute(sql`ALTER SEQUENCE budget_items_id_seq RESTART WITH 1`);
         for (const row of t.budgetItems) {
-          await db.execute(sql`INSERT INTO budget_items (id, description, short_title, type, category_id, subcategory_id, beneficiary_id, year_month, amount, transaction_date, bill_due_date, is_recurring, recurring_group_id, is_from_installment, installment_group_id, installment_current, installment_total, source, notes, active, created_at, updated_at) VALUES (${row.id}, ${row.description}, ${row.shortTitle}, ${row.type}, ${row.categoryId}, ${row.subcategoryId}, ${row.beneficiaryId}, ${row.yearMonth}, ${row.amount}, ${row.transactionDate}, ${row.billDueDate}, ${row.isRecurring}, ${row.recurringGroupId || null}, ${row.isFromInstallment}, ${row.installmentGroupId}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.source || 'manual'}, ${row.notes || null}, ${row.active !== undefined ? row.active : true}, ${row.createdAt || new Date().toISOString()}, ${row.updatedAt || new Date().toISOString()}) OVERRIDING SYSTEM VALUE`);
+          await db.execute(sql`INSERT INTO budget_items (id, description, short_title, type, category_id, subcategory_id, beneficiary_id, year_month, amount, transaction_date, bill_due_date, is_recurring, recurring_group_id, is_from_installment, installment_group_id, installment_current, installment_total, source, notes, active, created_at, updated_at) OVERRIDING SYSTEM VALUE VALUES (${row.id}, ${row.description}, ${row.shortTitle}, ${row.type}, ${row.categoryId}, ${row.subcategoryId}, ${row.beneficiaryId}, ${row.yearMonth}, ${row.amount}, ${row.transactionDate}, ${row.billDueDate}, ${row.isRecurring}, ${row.recurringGroupId || null}, ${row.isFromInstallment}, ${row.installmentGroupId}, ${row.installmentCurrent}, ${row.installmentTotal}, ${row.source || 'manual'}, ${row.notes || null}, ${row.active !== undefined ? row.active : true}, ${row.createdAt || now}, ${row.updatedAt || now}) ON CONFLICT (id) DO UPDATE SET description = EXCLUDED.description, short_title = EXCLUDED.short_title, type = EXCLUDED.type, category_id = EXCLUDED.category_id, subcategory_id = EXCLUDED.subcategory_id, beneficiary_id = EXCLUDED.beneficiary_id, year_month = EXCLUDED.year_month, amount = EXCLUDED.amount, transaction_date = EXCLUDED.transaction_date, bill_due_date = EXCLUDED.bill_due_date, is_recurring = EXCLUDED.is_recurring, recurring_group_id = EXCLUDED.recurring_group_id, is_from_installment = EXCLUDED.is_from_installment, installment_group_id = EXCLUDED.installment_group_id, installment_current = EXCLUDED.installment_current, installment_total = EXCLUDED.installment_total, source = EXCLUDED.source, notes = EXCLUDED.notes, active = EXCLUDED.active, updated_at = EXCLUDED.updated_at`);
         }
         const maxId = Math.max(...t.budgetItems.map((r: any) => r.id));
-        await db.execute(sql`ALTER SEQUENCE budget_items_id_seq RESTART WITH ${sql.raw(String(maxId + 1))}`);
+        await db.execute(sql`SELECT setval('budget_items_id_seq', ${sql.raw(String(maxId))}, true)`);
         imported.budgetItems = t.budgetItems.length;
       }
 
